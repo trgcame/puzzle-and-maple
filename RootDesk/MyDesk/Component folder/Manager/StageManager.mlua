@@ -1,0 +1,236 @@
+@Component
+script StageManager extends Component
+
+	property BattleManager BattleManager = "19ce6a28-58bd-4542-92b8-c265bc6eda48"
+
+	property CurrencyManager CurrencyManager = "2eb2fe06-342b-43dd-bcd0-feb6eae3550c"
+
+	method void OnBeginPlay()
+		self._T.currentStage   = 1
+		self._T.currentGroupId = 1
+		self._T.currentFloor   = 1
+		self._T.isFloorClear   = false
+		self._T.groupDatas     = {}
+		self:LoadStageData()
+	end
+
+	method void LoadStageData()
+		local count = _DataService:GetRowCount("StageSet")
+		self._T.groupDatas = {}
+		for i = 1, count do
+			local groupId  = tonumber(_DataService:GetCell("StageSet", i, "GroupId"))      or 0
+			local floorNum = tonumber(_DataService:GetCell("StageSet", i, "FloorNum"))     or 0
+			local ftype    = _DataService:GetCell("StageSet", i, "FloorType")              or "Battle"
+			local mid      = _DataService:GetCell("StageSet", i, "MonsterId")              or ""
+			local slotsStr = _DataService:GetCell("StageSet", i, "Slots") or "1"
+		
+			if groupId == 0 or floorNum == 0 or mid == "" then continue end
+		
+			-- "1,3" → {1, 3} 파싱
+			local slots = {}
+			for s in string.gmatch(slotsStr, "%d+") do
+				table.insert(slots, tonumber(s))
+			end
+			if #slots == 0 then slots = {1} end
+		
+			if self._T.groupDatas[groupId] == nil then
+				self._T.groupDatas[groupId] = {}
+			end
+			if self._T.groupDatas[groupId][floorNum] == nil then
+				self._T.groupDatas[groupId][floorNum] = { floorType = ftype, monsters = {} }
+			end
+			table.insert(self._T.groupDatas[groupId][floorNum].monsters, { monsterId = mid, slots = slots })
+		end
+		log("[StageManager] StageSet 로드 완료")
+		
+		-- GroupSet 로드 (그룹별 배경 RUID + 담당 스테이지 수)
+		self._T.groupBgData = {}
+		self._T.groupOrder  = {}   -- GroupSet에 적힌 순서대로의 그룹 id 목록
+		self._T.cycleLen    = 0    -- 한 바퀴 = 모든 그룹의 StageSpan 합
+		local gsCount = _DataService:GetRowCount("GroupSet")
+		for i = 1, gsCount do
+			local gid = tonumber(_DataService:GetCell("GroupSet", i, "GroupId")) or 0
+			if gid == 0 then continue end
+			local span = tonumber(_DataService:GetCell("GroupSet", i, "StageSpan")) or 10
+			if span < 1 then span = 1 end
+			self._T.groupBgData[gid] = {
+				normalRUID = _DataService:GetCell("GroupSet", i, "NormalBgRUID") or "",
+				bossRUID   = _DataService:GetCell("GroupSet", i, "BossBgRUID")   or "",
+				stageSpan  = span,
+			}
+			table.insert(self._T.groupOrder, gid)
+			self._T.cycleLen += span
+		end
+		log("[StageManager] GroupSet 로드 완료 — 그룹 " .. tostring(#self._T.groupOrder)
+			.. "개 · 한 바퀴 " .. tostring(self._T.cycleLen) .. "스테이지")
+	end
+
+	method table _ShuffledOrderForCycle(integer cycle)
+		-- 바퀴마다 그룹 순서를 섞는다. 단 **첫 바퀴(cycle 0)는 GroupSet 순서 그대로** —
+		-- 처음 플레이할 때는 1→2→3…으로 순서대로 보여주는 편이 자연스럽다.
+		--
+		-- ⚠️ 저장하지 않는다. `cycle`을 시드로 쓰는 **결정론적 셔플**이라
+		--    같은 스테이지는 언제 들어와도 항상 같은 그룹이 나오고, 모든 유저가 같은 순서를 본다.
+		--    `math.random`은 전역 시드를 건드려 다른 뽑기에 영향을 주므로 LCG를 직접 돌린다.
+		local order = {}
+		for i = 1, #self._T.groupOrder do order[i] = self._T.groupOrder[i] end
+		if cycle <= 0 or #order < 2 then return order end
+
+		local seed = (cycle * 1103515245 + 12345) % 2147483648
+		for i = #order, 2, -1 do
+			seed = (seed * 1103515245 + 12345) % 2147483648
+			local j = (seed % i) + 1
+			local tmp = order[i]
+			order[i] = order[j]
+			order[j] = tmp
+		end
+		return order
+	end
+
+	method integer GetGroupIdForStage(integer stage)
+		-- 스테이지 번호 → 그룹 id. 그룹 수를 코드에 박지 않으므로
+		-- `GroupSet`에 행을 늘리면 그대로 따라간다(1행이면 항상 그 그룹).
+		local n = #(self._T.groupOrder or {})
+		if n == 0 then return 1 end
+		if n == 1 then return self._T.groupOrder[1] end
+
+		local s = (stage or 1) - 1
+		if s < 0 then s = 0 end
+		local cycleLen = self._T.cycleLen
+		if cycleLen < 1 then return self._T.groupOrder[1] end
+
+		local cycle      = math.floor(s / cycleLen)   -- 몇 바퀴째인가
+		local idxInCycle = s % cycleLen               -- 이 바퀴 안에서 몇 번째 스테이지인가
+		local order      = self:_ShuffledOrderForCycle(cycle)
+
+		-- 그룹별 StageSpan을 누적해 idxInCycle이 속한 구간을 찾는다.
+		local acc = 0
+		for _, gid in ipairs(order) do
+			local data = self._T.groupBgData[gid]
+			local span = data ~= nil and data.stageSpan or 10
+			acc += span
+			if idxInCycle < acc then return gid end
+		end
+		return order[#order]
+	end
+
+	method integer GetFloorCountForGroup(integer groupId)
+		-- 이 그룹의 층 수 = StageSet에 정의된 최대 FloorNum. 데이터가 없으면 5층.
+		local floors = self._T.groupDatas ~= nil and self._T.groupDatas[groupId] or nil
+		if floors == nil then return 5 end
+		local maxFloor = 0
+		for floorNum, _ in pairs(floors) do
+			if floorNum > maxFloor then maxFloor = floorNum end
+		end
+		if maxFloor < 1 then return 5 end
+		return maxFloor
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StartStage(integer stageNum, integer groupId)
+		self._T.currentStage   = stageNum
+		self._T.currentGroupId = groupId
+		self._T.currentFloor   = 1
+		self._T.isFloorClear   = false
+		log("[StageManager] " .. tostring(stageNum) .. "스테이지 시작 groupId=" .. tostring(groupId))
+		self:StartCurrentFloor()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StartCurrentFloor()
+		local stage   = self._T.currentStage
+		local groupId = self._T.currentGroupId or 1
+		local floor   = self._T.currentFloor
+		self._T.isFloorClear = false
+		
+		local floorType = "Battle"
+		local monsters  = {}
+		
+		local groupFloors = self._T.groupDatas ~= nil and self._T.groupDatas[groupId] or nil
+		if groupFloors ~= nil and groupFloors[floor] ~= nil then
+			floorType = groupFloors[floor].floorType
+			monsters  = groupFloors[floor].monsters
+		else
+			local floorTypeMap = { "Battle", "Battle", "Elite", "Battle", "Boss" }
+			floorType = floorTypeMap[floor] or "Battle"
+		end
+		
+		-- ⚠️ 아직 5층 고정 전제다. 그룹마다 층수가 달라지면 누적이 어긋난다.
+		--    B3(스탯 공식 CSV화)에서 난이도 입력을 **절대층 → 스테이지 번호**로 바꾸면 이 문제가 사라진다.
+		local absoluteFloor = (stage - 1) * 5 + floor
+		
+		local bgData = self._T.groupBgData ~= nil and self._T.groupBgData[groupId] or nil
+		local bgRUID = ""
+		if bgData ~= nil then
+			bgRUID = (floorType == "Boss") and bgData.bossRUID or bgData.normalRUID
+		end
+		
+		local battleData = {
+			Stage        = stage,
+			Floor        = absoluteFloor,
+			FloorInStage = floor,
+			Type         = floorType,
+			Monsters     = monsters,
+			BgRUID       = bgRUID,
+		}
+		
+		log("[StageManager] " .. tostring(stage) .. "스테이지 " .. tostring(floor) .. "층 시작 (절대층=" .. tostring(absoluteFloor) .. ", 타입=" .. floorType .. ", 몬스터수=" .. tostring(#monsters) .. ")")
+		
+		if self.BattleManager ~= nil then
+			self.BattleManager:StartBattle(battleData)
+		else
+			log("[StageManager] BattleManager 연결 안 됨")
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void CompleteFloor()
+		if self._T.isFloorClear then return end
+		self._T.isFloorClear = true
+		local stage = self._T.currentStage
+		local floor = self._T.currentFloor
+		log("[StageManager] " .. tostring(stage) .. "스테이지 " .. tostring(floor) .. "층 클리어")
+		
+		if floor >= self:GetFloorCountForGroup(self._T.currentGroupId or 1) then
+			self:CompleteStage()
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void NextFloor()
+		if not self._T.isFloorClear then
+			log("[StageManager] NextFloor: 층 클리어 전")
+			return
+		end
+		if self._T.currentFloor >= self:GetFloorCountForGroup(self._T.currentGroupId or 1) then return end
+		self._T.currentFloor = self._T.currentFloor + 1
+		log("[StageManager] " .. tostring(self._T.currentFloor) .. "층으로 이동")
+		self:StartCurrentFloor()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void CompleteStage()
+		log("[StageManager] " .. tostring(self._T.currentStage) .. "스테이지 클리어!")
+		if isvalid(self.CurrencyManager) then
+			self.CurrencyManager:RequestUpdateMaxStage(self._T.currentStage)
+		end
+		-- 스테이지 랭킹 제출. 서버가 기존 기록과 비교해 더 높을 때만 기록한다.
+		_RankingManager:RequestSubmit("stage", self._T.currentStage)
+		if self.BattleManager ~= nil then
+			self.BattleManager:ShowStageClearResult()
+		end
+	end
+
+	method integer GetCurrentStage()
+		return self._T.currentStage or 1
+	end
+
+	method integer GetCurrentFloor()
+		return self._T.currentFloor or 1
+	end
+
+	method boolean IsFloorClear()
+		return self._T.isFloorClear or false
+	end
+
+end

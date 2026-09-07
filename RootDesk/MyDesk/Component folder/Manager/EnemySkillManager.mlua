@@ -1,0 +1,394 @@
+@Component
+script EnemySkillManager extends Component
+
+	property Entity BattleRootPanel = "ba1c053c-5eff-4cb5-b091-bc237f51878a"
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		self._T.skillData         = {}
+		self._T.skillEffects      = {}
+		self._T.effectData        = {}
+		self._T.damageMult        = 1.0
+		self._T.extraAtkMult      = 1.0
+		self._T.firedHpThresholds = {}
+		self._T.currentEnemyId   = ""
+		self._T.turnIndex         = 0
+		self._T.partOrig          = {}   -- 보스 파츠의 **진짜** 원본 스프라이트 (파츠명 → {ruid, play, rate})
+		self._T.fxGen             = {}   -- 파츠별 이펙트 재생 세대 — 낡은 복원 타이머 무효화용
+		self:_LoadData()
+		log("[EnemySkillManager] OnBeginPlay 완료")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _LoadData()
+		-- EnemySkillSet 로드
+		local count = _DataService:GetRowCount("EnemySkillSet")
+		for i = 1, count do
+			local enemyId = _DataService:GetCell("EnemySkillSet", i, "EnemyId")
+			if enemyId == nil or enemyId == "" then continue end
+			if self._T.skillData[enemyId] == nil then
+				self._T.skillData[enemyId] = {}
+			end
+			local skill = {
+				skillId       = _DataService:GetCell("EnemySkillSet", i, "SkillId")       or "",
+				skillName     = _DataService:GetCell("EnemySkillSet", i, "SkillName")     or "",
+				skillCategory = _DataService:GetCell("EnemySkillSet", i, "SkillCategory") or "debuff",
+				triggerType   = _DataService:GetCell("EnemySkillSet", i, "TriggerType")   or "",
+				triggerValue  = _DataService:GetCell("EnemySkillSet", i, "TriggerValue")  or "",
+				targetType    = _DataService:GetCell("EnemySkillSet", i, "TargetType")    or "all",
+				gimmickType   = _DataService:GetCell("EnemySkillSet", i, "GimmickType")   or "",
+				gimmickParam  = tonumber(_DataService:GetCell("EnemySkillSet", i, "GimmickParam")) or 1.0,
+				description   = _DataService:GetCell("EnemySkillSet", i, "SkillDescription") or "",
+			}
+			table.insert(self._T.skillData[enemyId], skill)
+		end
+		
+		-- EnemySkillEffectSet 로드 (히어로 스킬과 동일 구조)
+		local eCount = _DataService:GetRowCount("EnemySkillEffectSet")
+		for i = 1, eCount do
+			local skillId = _DataService:GetCell("EnemySkillEffectSet", i, "SkillId")
+			if skillId == nil or skillId == "" then continue end
+			if self._T.skillEffects[skillId] == nil then
+				self._T.skillEffects[skillId] = {}
+			end
+			table.insert(self._T.skillEffects[skillId], {
+				effectType = _DataService:GetCell("EnemySkillEffectSet", i, "EffectType") or "",
+				valueA     = tonumber(_DataService:GetCell("EnemySkillEffectSet", i, "ValueA"))    or 0,
+				valueB     = tonumber(_DataService:GetCell("EnemySkillEffectSet", i, "ValueB"))    or 0,
+				duration   = tonumber(_DataService:GetCell("EnemySkillEffectSet", i, "Duration"))  or 0,
+				targetId   = _DataService:GetCell("EnemySkillEffectSet", i, "TargetId") or "",
+			})
+		end
+		
+		-- EnemyEffectSet 로드 (비주얼 이펙트 — HeroSkillVisualSet 구조 대응)
+		local vCount = _DataService:GetRowCount("EnemyEffectSet")
+		for i = 1, vCount do
+			local skillId = _DataService:GetCell("EnemyEffectSet", i, "SkillId")
+			if skillId == nil or skillId == "" then continue end
+			self._T.effectData[skillId] = {
+				monsterEffectRUID    = _DataService:GetCell("EnemyEffectSet", i, "MonsterEffectRUID")    or "",
+				-- 이펙트를 붙일 자식 엔티티 이름. 보스는 파츠(`BossPart0~3`)마다 다른 스킬 연출을 건다.
+				-- 비면 슬롯 전체에 건다(일반 몬스터는 항상 공란).
+				monsterEffectTarget  = _DataService:GetCell("EnemyEffectSet", i, "MonsterEffectTarget")  or "",
+				monsterDuration      = tonumber(_DataService:GetCell("EnemyEffectSet", i, "MonsterDuration"))   or 1.0,
+				monsterPlayRate      = tonumber(_DataService:GetCell("EnemyEffectSet", i, "MonsterPlayRate"))   or 1.0,
+				-- 시전 연출이 시작되고 **실제 타격이 들어갈 때까지**의 리드타임(초).
+				-- 0이면 연출 길이의 45% 지점을 임팩트로 잡는다(`GetImpactDelay`).
+				impactDelay          = tonumber(_DataService:GetCell("EnemyEffectSet", i, "ImpactDelay"))       or 0,
+				heroEffectRUID       = _DataService:GetCell("EnemyEffectSet", i, "HeroEffectRUID")       or "",
+				heroPlayRate         = tonumber(_DataService:GetCell("EnemyEffectSet", i, "HeroPlayRate"))      or 1.0,
+				projectileEffectRUID = _DataService:GetCell("EnemyEffectSet", i, "ProjectileEffectRUID") or "",
+				projectileDuration   = tonumber(_DataService:GetCell("EnemyEffectSet", i, "ProjectileDuration")) or 0,
+				screenEffectRUID     = _DataService:GetCell("EnemyEffectSet", i, "ScreenEffectRUID")     or "",
+				screenDuration       = tonumber(_DataService:GetCell("EnemyEffectSet", i, "ScreenDuration"))    or 0,
+				screenPlayRate       = tonumber(_DataService:GetCell("EnemyEffectSet", i, "ScreenPlayRate"))     or 1.0,
+				soundRUID            = _DataService:GetCell("EnemyEffectSet", i, "SoundRUID")            or "",
+				heroSoundRUID        = _DataService:GetCell("EnemyEffectSet", i, "HeroSoundRUID")        or "",
+			}
+		end
+
+		-- 몬스터 이펙트 클립의 **실제 재생 시간**을 미리 재둔다.
+		-- 보스 파츠를 원래 그림으로 되돌리는 시점에 쓴다. `MonsterDuration`은 연출 템포
+		-- (다음 동작까지의 대기)라 클립 길이와 다르다 — 그걸 복원에 쓰면 애니가 중간에 잘린다.
+		-- 전투 중에 `LoadAnimationClipAndWait`를 부르면 프레임이 멈추므로 로딩 때 한 번만 잰다.
+		self._T.clipLen = {}
+		for i = 1, vCount do
+			local ruid = _DataService:GetCell("EnemyEffectSet", i, "MonsterEffectRUID") or ""
+			if ruid == "" or self._T.clipLen[ruid] ~= nil then continue end
+			local clip = _ResourceService:LoadAnimationClipAndWait(ruid)
+			if clip == nil then continue end
+			local total = 0
+			for _, f in ipairs(clip.Frames) do total += f.Delay end
+			self._T.clipLen[ruid] = total
+			log("[EnemySkillManager] 클립 길이 " .. string.sub(ruid, 1, 8) .. " = " .. string.format("%.2f", total) .. "초")
+		end
+
+		log("[EnemySkillManager] 데이터 로드 완료")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void InitForBattle(string enemyId)
+		self._T.currentEnemyId    = enemyId
+		self._T.damageMult        = 1.0
+		self._T.extraAtkMult      = 1.0
+		self._T.firedHpThresholds = {}
+		self._T.turnIndex         = 0
+		-- 보스가 바뀌면 파츠 그림도 바뀐다. 이전 전투의 원본을 들고 있으면 엉뚱한 그림으로 복원된다.
+		-- 세대도 리셋해 이전 전투에서 남은 복원 타이머를 무효화한다.
+		self._T.partOrig          = {}
+		self._T.fxGen             = {}
+		log("[EnemySkillManager] InitForBattle enemyId=" .. tostring(enemyId))
+	end
+
+	@ExecSpace("ClientOnly")
+	method table GetSkillsForMonster(string monsterId, integer turnIndex)
+		local skills = self._T.skillData[monsterId]
+		if skills == nil or turnIndex <= 0 then return {} end
+		local result = {}
+		for _, skill in ipairs(skills) do
+			if skill.triggerType == "every_n_turns" then
+				local n = tonumber(skill.triggerValue) or 1
+				if n > 0 and turnIndex % n == 0 then
+					table.insert(result, skill)
+				end
+			end
+		end
+		return result
+	end
+
+	@ExecSpace("ClientOnly")
+	method table GetSkillEffects(string skillId)
+		return self._T.skillEffects[skillId] or {}
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean HasHeroEffect(string skillId)
+		-- 스킬이 자기 피격 이펙트를 갖고 있는가.
+		-- 있으면 호출부가 기본 공격 피격 이펙트를 생략해야 한다 — 둘 다 틀면 영웅 위에 겹친다.
+		local cfg = self._T.effectData[skillId]
+		return cfg ~= nil and cfg.heroEffectRUID ~= ""
+	end
+
+	@ExecSpace("ClientOnly")
+	method number GetSkillEffectDuration(string skillId, number defaultDuration)
+		local cfg = self._T.effectData[skillId]
+		if cfg == nil then return defaultDuration end
+		-- `MonsterDuration`이 있으면 그 값(명시적 오버라이드), 없으면 **클립 실제 길이 ÷ PlayRate**.
+		-- CSV를 비워둬도 연출이 끝날 때까지 기다리므로 이펙트를 바꿔도 따로 손볼 게 없다.
+		if (cfg.monsterDuration or 0) > 0 then return cfg.monsterDuration end
+		local rate    = cfg.monsterPlayRate > 0 and cfg.monsterPlayRate or 1.0
+		local clipLen = self._T.clipLen[cfg.monsterEffectRUID or ""]
+		if clipLen ~= nil and clipLen > 0 then return clipLen / rate end
+		return defaultDuration
+	end
+
+	-- 시전자 연출이 시작되고 **실제 타격이 들어갈 때까지**의 대기(초).
+	-- 0을 돌려주면 호출부는 기다리지 않는다(연출이 없는 스킬 = 예전 동작 그대로).
+	-- 총 연출 길이는 `GetSkillEffectDuration`이 그대로 쥐고 있으므로,
+	-- 호출부가 여기서 기다린 만큼을 빼면 **턴 길이는 변하지 않고 임팩트 시점만 뒤로 밀린다.**
+	@ExecSpace("ClientOnly")
+	method number GetImpactDelay(string skillId)
+		local cfg = self._T.effectData[skillId]
+		if cfg == nil then return 0 end
+		if (cfg.impactDelay or 0) > 0 then return cfg.impactDelay end
+		if (cfg.monsterEffectRUID or "") == "" then return 0 end
+		local total = self:GetSkillEffectDuration(skillId, 0)
+		if total <= 0 then return 0 end
+		return total * 0.45
+	end
+
+	@ExecSpace("ClientOnly")
+	method number GetDamageMult()
+		return self._T.damageMult or 1.0
+	end
+
+	@ExecSpace("ClientOnly")
+	method number GetExtraAtkMult()
+		-- 기믹은 한 번 켜지면 전투가 끝날 때까지 유지된다(`shield_magic`과 같은 규칙).
+		--
+		-- 🔴 예전에는 **읽는 순간 1.0으로 되돌리는 1회성**이었다. 그래서
+		--    ① 보스가 페이즈 3 진입 턴에만 강해졌고(사용자 의도는 "페이즈 3 이후 계속 2배")
+		--    ② 진단 목적으로 `GetBossAttackDamage()`를 한 번 부르면
+		--       **다음 실제 공격의 배율을 훔쳐갔다.**
+		return self._T.extraAtkMult or 1.0
+	end
+
+	@ExecSpace("ClientOnly")
+	method void NotifyPhaseChange(integer phase)
+		-- 페이즈가 바뀌면 보스 HP가 새로 가득 찬다 → hp_threshold를 다시 무장한다.
+		-- 이 장부를 안 비우면 임계값 기믹이 **판당 한 번**만 걸린다(페이즈 3개여도 1회).
+		self._T.firedHpThresholds = {}
+		log("[EnemySkillManager] 페이즈 " .. tostring(phase) .. " — hp_threshold 재무장")
+
+		local skills = self._T.skillData[self._T.currentEnemyId]
+		if skills == nil then return end
+		for _, skill in ipairs(skills) do
+			if skill.triggerType == "phase_change" and tonumber(skill.triggerValue) == phase then
+				self:_ActivateGimmick(skill)
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void NotifyHpRatio(number ratio)
+		local skills = self._T.skillData[self._T.currentEnemyId]
+		if skills == nil then return end
+		for _, skill in ipairs(skills) do
+			if skill.triggerType ~= "hp_threshold" then continue end
+			local threshold = tonumber(skill.triggerValue) or 0
+			if ratio <= threshold and not self._T.firedHpThresholds[skill.skillId] then
+				self._T.firedHpThresholds[skill.skillId] = true
+				self:_ActivateGimmick(skill)
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _ActivateGimmick(table skill)
+		local gType  = skill.gimmickType
+		local gParam = skill.gimmickParam
+		if gType == "shield_magic" then
+			self._T.damageMult = gParam
+			log("[EnemySkillManager] 방어막 활성화 damageMult=" .. tostring(gParam))
+		elseif gType == "attack_all" then
+			self._T.extraAtkMult = gParam
+			log("[EnemySkillManager] 전체공격 활성화 extraAtkMult=" .. tostring(gParam))
+		end
+		
+		-- ⚠️ effectData[skillId]는 **레코드 1개**다(행 배열이 아니다).
+		--    예전 코드는 ipairs로 돌아 루프가 0회였고, 참조하던 eff.effectRUID는 스키마에 없는 필드였다.
+		--    기믹은 특정 몬스터 슬롯이 아니라 화면 전체에 거는 연출이므로 사운드 + 스크린 이펙트만 쓴다.
+		local cfg = self._T.effectData[skill.skillId]
+		if cfg == nil then
+			log("[EnemySkillManager] 기믹 연출 없음 skillId=" .. tostring(skill.skillId) .. " (EnemyEffectSet 행 미등록)")
+			return
+		end
+		if cfg.soundRUID ~= "" then
+			_SoundService:PlaySound(cfg.soundRUID, 1.0)
+		end
+		if cfg.screenEffectRUID ~= "" and isvalid(self.BattleRootPanel) then
+			_Effect:PlayEffect(cfg.screenEffectRUID, self.BattleRootPanel, Vector2(0, 0),
+				{ PreserveSprite = "None", FitParent = true, PlayRate = cfg.screenPlayRate, PlayOnce = true })
+		end
+		log("[EnemySkillManager] 기믹 연출 재생 skillId=" .. tostring(skill.skillId)
+			.. " sound=" .. tostring(cfg.soundRUID ~= "")
+			.. " screen=" .. tostring(cfg.screenEffectRUID ~= ""))
+	end
+
+	-- 시전자 연출 + 임팩트 연출을 한 번에 (버프·디버프·소환·기믹처럼 순서가 상관없는 경우).
+	-- ⚠️ **공격 스킬은 이걸 쓰면 안 된다** — 시전자 모션과 피격이 같은 프레임에 터져
+	--    "때리기도 전에 맞는" 그림이 된다. `PlayCasterEffects` → 대기 → `PlayImpactEffects`로 나눠 부를 것.
+	@ExecSpace("ClientOnly")
+	method void PlaySkillEffects(string skillId, string skillCategory, Entity monsterSlot, table heroSlots, Entity battlePanel)
+		self:PlayCasterEffects(skillId, monsterSlot)
+		self:PlayImpactEffects(skillId, skillCategory, monsterSlot, heroSlots, battlePanel)
+	end
+
+	-- [1/2] 시전자 쪽 — 스킬 사운드 + 시전자 스프라이트 교체. 카테고리와 무관하다.
+	@ExecSpace("ClientOnly")
+	method void PlayCasterEffects(string skillId, Entity monsterSlot)
+		local cfg = self._T.effectData[skillId]
+		if cfg == nil then
+			log("[EnemySkillManager] 연출 없음 skillId=" .. tostring(skillId) .. " (EnemyEffectSet 행 미등록)")
+			return
+		end
+		-- "이펙트가 안 보인다"를 데이터 미등록 / 대상 없음 / RUID 문제로 갈라내는 단서.
+		log("[EnemySkillManager] 시전 연출 " .. tostring(skillId)
+			.. " 적슬롯=" .. tostring(isvalid(monsterSlot))
+			.. " monster=" .. tostring(cfg.monsterEffectRUID ~= "")
+			.. " sound=" .. tostring(cfg.soundRUID ~= "")
+			.. " impactDelay=" .. string.format("%.2f", self:GetImpactDelay(skillId)))
+
+		-- 사운드 (스킬 발동 시)
+		if cfg.soundRUID ~= "" then
+			_SoundService:PlaySound(cfg.soundRUID, 1.0)
+		end
+		
+		-- 몬스터 자체 애니메이션 (버프·디버프·공격 공통)
+		if cfg.monsterEffectRUID ~= "" and isvalid(monsterSlot) then
+			-- 이펙트를 붙일 자리. `MonsterEffectTarget`이 지정돼 있으면 그 직계 자식(보스 파츠)에 건다.
+			local fxSlot = monsterSlot
+			if cfg.monsterEffectTarget ~= "" then
+				local part = monsterSlot:GetChildByName(cfg.monsterEffectTarget, false)
+				if isvalid(part) then
+					fxSlot = part
+				else
+					log_warning("[EnemySkillManager] 파츠 '" .. tostring(cfg.monsterEffectTarget)
+						.. "' 없음 — 슬롯 전체에 재생 skillId=" .. tostring(skillId))
+				end
+			end
+
+			local sprEnt = fxSlot:GetChildByName("MonsterSprite", true)
+			if not isvalid(sprEnt) then sprEnt = fxSlot end
+			local renderer = sprEnt.SpriteGUIRendererComponent
+			if renderer ~= nil then
+				-- 보스 파츠도 일반 몬스터와 같은 방식 — 자기 스프라이트를 이펙트 클립으로 갈아끼운다.
+				-- 다만 보스는 되돌려줄 주체가 없다(일반 몬스터는 공격·피격 애니가 원본으로 복원해준다).
+				-- 그래서 파츠를 지정한 경우에만 원본 RUID를 잡아뒀다가 duration 뒤에 직접 복원한다.
+				local rate = cfg.monsterPlayRate > 0 and cfg.monsterPlayRate or 1.0
+
+				if cfg.monsterEffectTarget ~= "" then
+					local key = cfg.monsterEffectTarget
+					-- ⚠️ 원본은 파츠별로 **딱 한 번만** 기억한다.
+					--    이전 이펙트가 재생 중일 때 새 이펙트가 덮으면 그 순간의 ImageRUID는
+					--    '이전 이펙트'다. 그걸 원본으로 알고 복원하면 **보스가 이펙트 그림으로 굳는다.**
+					if self._T.partOrig[key] == nil then
+						self._T.partOrig[key] = {
+							ruid = renderer.ImageRUID,
+							play = renderer.AnimClipPlayType,
+							rate = renderer.PlayRate,
+						}
+					end
+					-- 세대 카운터로 낡은 복원 타이머를 무효화한다.
+					-- 없으면 이전 이펙트의 타이머가 새 이펙트를 도중에 지워버린다.
+					self._T.fxGen[key] = (self._T.fxGen[key] or 0) + 1
+					local gen = self._T.fxGen[key]
+
+					renderer.ImageRUID        = cfg.monsterEffectRUID
+					renderer.AnimClipPlayType = SpriteAnimClipPlayType.Onetime
+					renderer.PlayRate         = rate
+
+					-- ⚠️ 복원 시점은 **클립의 실제 길이 ÷ PlayRate** 기준이다.
+					--    `MonsterDuration`(연출 템포, 보통 1.0)을 쓰면 3~5초짜리 애니가 중간에 잘린다.
+					local clipLen          = self._T.clipLen[cfg.monsterEffectRUID]
+					local dur              = (clipLen ~= nil and clipLen > 0) and (clipLen / rate)
+						or (cfg.monsterDuration > 0 and cfg.monsterDuration or 1.0)
+					local capturedRenderer = renderer
+					local capturedKey      = key
+					_TimerService:SetTimerOnce(function()
+						if self._T.fxGen[capturedKey] ~= gen then return end   -- 더 새로운 재생이 있었다
+						local o = self._T.partOrig[capturedKey]
+						if o ~= nil and isvalid(capturedRenderer) then
+							capturedRenderer.ImageRUID        = o.ruid
+							capturedRenderer.AnimClipPlayType = o.play
+							capturedRenderer.PlayRate         = o.rate
+						end
+					end, dur)
+				else
+					-- 일반 몬스터: 복원은 MonsterManager의 공격·피격 애니가 맡는다.
+					renderer.ImageRUID        = cfg.monsterEffectRUID
+					renderer.AnimClipPlayType = SpriteAnimClipPlayType.Onetime
+					renderer.PlayRate         = rate
+				end
+			else
+				-- 렌더러가 없는 컨테이너(보스 몸통 `BossSlot`은 파츠를 담는 그릇이라 렌더러가 없다).
+				-- 갈아끼울 스프라이트가 없으니 이펙트 엔티티를 위에 얹는다.
+				_Effect:PlayEffect(cfg.monsterEffectRUID, fxSlot, Vector2(0, 0),
+					{ PlayRate = cfg.monsterPlayRate, PlayOnce = true })
+			end
+		end
+		
+	end
+
+	-- [2/2] 임팩트 쪽 — 공격 스킬 전용: 발사체 → 히어로 이펙트 → 히어로 사운드 → 스크린.
+	-- 호출부가 `GetImpactDelay`만큼 기다린 **뒤**에 부르면 피격 연출이 시전 모션과 맞물린다.
+	@ExecSpace("ClientOnly")
+	method void PlayImpactEffects(string skillId, string skillCategory, Entity monsterSlot, table heroSlots, Entity battlePanel)
+		local cfg = self._T.effectData[skillId]
+		if cfg == nil then return end
+
+		if skillCategory == "attack" then
+			log("[EnemySkillManager] 임팩트 연출 " .. tostring(skillId)
+				.. " 영웅슬롯=" .. tostring(heroSlots ~= nil and #heroSlots or 0)
+				.. " hero=" .. tostring(cfg.heroEffectRUID ~= ""))
+			if cfg.projectileEffectRUID ~= "" and isvalid(monsterSlot) and heroSlots ~= nil and #heroSlots > 0 and isvalid(battlePanel) then
+				local dur = cfg.projectileDuration > 0 and cfg.projectileDuration or 0.3
+				_Effect:PlayProjectileEffect(cfg.projectileEffectRUID, monsterSlot, heroSlots[1], battlePanel, dur, {})
+			end
+			if cfg.heroEffectRUID ~= "" and heroSlots ~= nil then
+				for _, hs in ipairs(heroSlots) do
+					if isvalid(hs) then
+						_Effect:PlayEffect(cfg.heroEffectRUID, hs, Vector2(0, 0), {PlayRate = cfg.heroPlayRate, PlayOnce = true})
+					end
+				end
+			end
+			if cfg.heroSoundRUID ~= "" then
+				_SoundService:PlaySound(cfg.heroSoundRUID, 1.0)
+			end
+			if cfg.screenEffectRUID ~= "" and isvalid(battlePanel) then
+				_Effect:PlayEffect(cfg.screenEffectRUID, battlePanel, Vector2(0, 0), {PreserveSprite = "None", FitParent = true, PlayRate = cfg.screenPlayRate, PlayOnce = true})
+			end
+		end
+	end
+
+end

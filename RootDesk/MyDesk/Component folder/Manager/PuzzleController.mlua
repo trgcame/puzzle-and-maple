@@ -1,0 +1,137 @@
+@Component
+script PuzzleController extends Component
+
+	property Vector2 OriginPos = Vector2(0, 0)
+
+	property integer OriginRow = 0
+
+	property integer OriginColumn = 0
+
+	property number SwapDistance = 55
+
+	property TurnManager TurnManager = "43e421d6-5bf3-4ec4-bb64-562f3c811a45"
+
+	property Vector2 DragOffset = Vector2(0, 0)
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		local tmEntity = _EntityService:GetEntityByPath("/common/Manager/TurnManager")
+		if tmEntity ~= nil then
+			self.TurnManager = tmEntity.TurnManager
+		end
+	end
+
+	@EventSender("Self")
+	handler HandleUITouchDownEvent(UITouchDownEvent event)
+		if self.TurnManager.CurrentTurn ~= "Player" then
+			return
+		end
+		self.OriginPos = self.Entity.UITransformComponent.anchoredPosition
+		self.OriginRow = self.Entity.Puzzle.Row
+		self.OriginColumn = self.Entity.Puzzle.Column
+		self.DragOffset = Vector2(0, 0)
+	end
+
+	@EventSender("Self")
+	handler HandleUITouchBeginDragEvent(UITouchBeginDragEvent event)
+		if self.TurnManager.CurrentTurn ~= "Player" then
+			return
+		end
+		if _PuzzleLogic.CurrentDragPuzzle ~= nil then
+			return
+		end
+		self._T.lastDragGrid = nil
+		_PuzzleLogic:StartDrag(self.Entity)
+	end
+
+	@EventSender("Self")
+	handler HandleUITouchDragEvent(UITouchDragEvent event)
+		if self.TurnManager.CurrentTurn ~= "Player" then
+			return
+		end
+		if not _PuzzleLogic:CanDragPuzzle(self.Entity) then
+			return
+		end
+		
+		-- 절대 위치 기반 추적
+		local localTouch = _UILogic:ScreenToLocalUIPosition(event.TouchPoint, self.Entity.Parent.UITransformComponent)
+		local newPos = localTouch + self.DragOffset
+		
+		-- 보드 영역 밖 이동 제한
+		local pb = self.Entity.Parent.PuzzleBoard
+		local halfW = pb.TileSize.x * (pb.BoardColumn - 1) / 2
+		local halfH = pb.TileSize.y * (pb.BoardRow - 1) / 2
+		newPos = Vector2(
+			math.max(-halfW, math.min(halfW, newPos.x)),
+			math.max(-halfH, math.min(halfH, newPos.y))
+		)
+		self.Entity.UITransformComponent.anchoredPosition = newPos
+		
+		-- 드래그 위치의 그리드 셀 계산
+		local gridPos   = pb:GetGridFromUIPosition(newPos)
+		local targetRow = gridPos.x
+		local targetCol = gridPos.y
+		
+		-- 이전 드래그 그리드 위치 (없으면 현재 위치로 초기화)
+		local lastGrid = self._T.lastDragGrid or gridPos
+		self._T.lastDragGrid = gridPos
+		
+		-- 이전~현재 사이 경로를 보간하여 스킵된 셀도 순서대로 처리
+		local rowDiff = targetRow - lastGrid.x
+		local colDiff = targetCol - lastGrid.y
+		local steps   = math.max(math.abs(rowDiff), math.abs(colDiff), 1)
+		
+		for i = 1, steps do
+			local stepRow = math.floor(lastGrid.x + rowDiff * i / steps + 0.5)
+			local stepCol = math.floor(lastGrid.y + colDiff * i / steps + 0.5)
+		
+			-- 스왑 후 타일 위치가 바뀌므로 매 단계마다 재조회
+			local myRow = self.Entity.Puzzle.Row
+			local myCol = self.Entity.Puzzle.Column
+		
+			if stepRow == myRow and stepCol == myCol then
+				_PuzzleLogic.LastSwapPuzzle = nil
+				continue
+			end
+		
+			-- 1칸 초과 이동 차단 (대각선 포함)
+			if math.abs(stepRow - myRow) > 1 or math.abs(stepCol - myCol) > 1 then
+				continue
+			end
+		
+			local target = pb.Puzzles[stepRow][stepCol]
+			if target == nil or target == _PuzzleLogic.LastSwapPuzzle then
+				continue
+			end
+		
+			pb:SwapPuzzle(_PuzzleLogic.CurrentDragPuzzle, target)
+			_SoundService:PlaySound("7baa63bf160d49f6b724b96212c7f704", 1.0)
+			_PuzzleLogic.LastSwapPuzzle = target
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FinishDrag()
+		-- 드래그 종료 공통 처리. **손을 뗐을 때**와 **제한 시간이 다 됐을 때**(`PuzzleLogic:OnUpdate`)
+		-- 둘 다 여기로 온다. 두 경로가 갈라지면 시간 초과가 턴을 안 넘기거나 스냅을 빠뜨린다.
+		local wasDragging = _PuzzleLogic.CurrentDragPuzzle == self.Entity
+		_PuzzleLogic:EndDrag()
+
+		if not wasDragging then return end
+
+		-- 원래 셀 그대로면 원위치, 이동했으면 그리드에 스냅
+		if self.Entity.Puzzle.Row == self.OriginRow and self.Entity.Puzzle.Column == self.OriginColumn then
+			self.Entity.UITransformComponent.anchoredPosition = self.OriginPos
+		else
+			self.Entity.Puzzle:SnapToGridOrSwap()
+		end
+
+		self.TurnManager:EndPlayerTurn()
+	end
+
+	@EventSender("Self")
+	handler HandleUITouchEndDragEvent(UITouchEndDragEvent event)
+		self:FinishDrag()
+	end
+
+end

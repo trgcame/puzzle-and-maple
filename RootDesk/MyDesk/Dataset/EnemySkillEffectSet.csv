@@ -1,0 +1,9 @@
+﻿SkillId,EffectOrder,EffectType,ValueA,ValueB,Duration,TargetId
+lantern_block_heal,1,block_heal,0,0,2,
+arma_summon,1,summon_minion,2,0,0,arma_minion
+balrog_smash,1,damage_all,2.0,0,0,
+balrog_seal,1,block_heal,0,0,2,
+balrog_pierce,1,damage_single,4.0,0,0,
+churup_smash,1,damage_all,2.5,0,0,
+harmony_collapse,1,damage_single,3.5,0,0,
+adoratio_regen,1,heal_self,0.2,0,0,

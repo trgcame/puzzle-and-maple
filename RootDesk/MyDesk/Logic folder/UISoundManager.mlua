@@ -1,0 +1,89 @@
+@Logic
+script UISoundManager extends Logic
+
+	-- 공용 UI 클릭 사운드. 화면 파일마다 버튼에 붙이는 대신 **여기 한 곳**에서 전부 배선한다.
+	-- (2026-09-07 Phase 5 G16 — 점검 결과 버튼 166개 중 SFX가 붙은 것이 0개였다)
+	property string clickSoundRUID = "7eda004ded944e459f1fbb16c7f0f3f4"
+
+	property number volume = 1.0
+
+	-- 재스캔 주기(초). 0이면 최초 1회만.
+	-- 🔴 주기 스캔이 필요한 이유: `DefaultShow=false` 그룹의 자식은 `OnBeginPlay` 시점에 존재하지
+	--    않아서(상시 이슈 표 참조) 한 번만 훑으면 팝업·상세 패널 안의 버튼을 통째로 놓친다.
+	property number rescanInterval = 2.0
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- UI 트리를 훑어 `ButtonComponent`가 있는 엔티티마다 클릭음을 연결한다.
+		self._T.hooked = {}   -- entityId -> EventHandler
+		self._T.count  = 0
+		self:ScanAndHook()
+		if (self.rescanInterval or 0) > 0 then
+			self._T.timerId = _TimerService:SetTimerRepeat(function()
+				self:ScanAndHook()
+			end, self.rescanInterval)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		-- 타이머·이벤트 정리. 연결한 만큼 반드시 끊는다.
+		if self._T.timerId ~= nil then
+			_TimerService:ClearTimer(self._T.timerId)
+			self._T.timerId = nil
+		end
+		if self._T.hooked ~= nil then
+			for _, rec in pairs(self._T.hooked) do
+				if isvalid(rec.entity) then
+					rec.entity:DisconnectEvent(ButtonClickEvent, rec.evtHandler)
+				end
+			end
+			self._T.hooked = {}
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ScanAndHook()
+		-- `/ui` 아래 전체를 재귀로 훑는다. 이미 연결한 엔티티는 `Id`로 걸러 중복 연결을 막는다.
+		local root = _EntityService:GetEntityByPath("/ui")
+		if not isvalid(root) then
+			log_warning("[UISound] /ui 경로를 찾지 못했다 — 배선 건너뜀")
+			return
+		end
+		local added = self:HookRecursive(root)
+		if added > 0 then
+			self._T.count = (self._T.count or 0) + added
+			log("[UISound] 버튼 " .. tostring(added) .. "개 신규 배선 (누적 " .. tostring(self._T.count) .. ")")
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer HookRecursive(Entity e)
+		-- 자기 자신과 모든 자손을 검사해 새로 붙인 개수를 돌려준다.
+		local added = 0
+		if not isvalid(e) then return 0 end
+
+		local btn = e.ButtonComponent
+		if btn ~= nil then
+			local key = e.Id
+			if key ~= nil and key ~= "" and self._T.hooked[key] == nil then
+				local h = e:ConnectEvent(ButtonClickEvent, self.OnAnyButtonClick)
+				self._T.hooked[key] = { entity = e, evtHandler = h }
+				added += 1
+			end
+		end
+
+		for _, child in ipairs(e.Children:ToTable()) do
+			added += self:HookRecursive(child)
+		end
+		return added
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnAnyButtonClick(ButtonClickEvent event)
+		-- 모든 UI 버튼의 공용 클릭음.
+		if self.clickSoundRUID == nil or self.clickSoundRUID == "" then return end
+		_SoundService:PlaySound(self.clickSoundRUID, self.volume or 1.0)
+	end
+
+end

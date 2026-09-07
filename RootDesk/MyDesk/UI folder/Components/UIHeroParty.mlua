@@ -1,0 +1,129 @@
+@Component
+script UIHeroParty extends Component
+
+	property TextGUIRendererComponent PartyCountText = "d8985010-b505-488e-b71e-f706085259f2"
+
+	property Entity HeroGroup = "174598c1-16b3-4302-9248-fbd03a809dd3"
+
+	property Entity HeroGroup1 = "e573ded3-cd12-485c-a25a-77c1f029b729"
+
+	property Entity HeroGroup2 = "06f8f362-555a-4330-9b82-95e4ca019c60"
+
+	property Entity HeroGroup3 = "629ac778-4c54-41b2-8fc5-a101f5f3e198"
+
+	property Entity HeroGroup4 = "5417874b-a202-4ec5-80d6-947423535d7a"
+
+	property SpriteGUIRendererComponent CenterWhiteHero = "21e2dbbb-8680-4afb-a61c-6e3082cf5d65"
+
+	property TextGUIRendererComponent CenterHeroText = "ee285b4c-788b-4fc6-a21c-c728d2de37e4"
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- 모든 슬롯의 HeroThumnail 자식에서 버튼 클릭 이벤트 연결
+		self._T.btnHandlers = {}
+		self._T.btnEnts = {}
+		
+		local slotEnts = {
+			self.HeroGroup, self.HeroGroup1, self.HeroGroup2,
+			self.HeroGroup3, self.HeroGroup4,
+		}
+		for i, slotEnt in ipairs(slotEnts) do
+			if not isvalid(slotEnt) then continue end
+			local btnEnt = slotEnt:GetChildByName("HeroThumnail", true)
+			if not isvalid(btnEnt) then continue end
+			self._T.btnEnts[i] = btnEnt
+			local idx = i
+			self._T.btnHandlers[i] = btnEnt:ConnectEvent(ButtonClickEvent, function()
+				self:SelectHeroSlot(idx)
+			end)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		-- 파티 슬롯 버튼 이벤트 해제
+		if self._T.btnHandlers == nil then return end
+		for i, evtHandle in ipairs(self._T.btnHandlers) do
+			local btnEnt = self._T.btnEnts[i]
+			if isvalid(btnEnt) and evtHandle ~= nil then
+				btnEnt:DisconnectEvent(ButtonClickEvent, evtHandle)
+			end
+		end
+		self._T.btnHandlers = {}
+		self._T.btnEnts = {}
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SelectHeroSlot(integer slotIndex)
+		-- 클릭된 슬롯 영웅의 썸네일과 이름을 Center에 반영
+		local data = _HeroDataManager:GetInventoryData()
+		if data == nil then return end
+		local party = data.party or {}
+		local heroId = party[slotIndex]
+		if heroId == nil then return end
+		
+		local base = _HeroDataManager:GetHeroBaseData(heroId)
+		if base == nil then return end
+		
+		if isvalid(self.CenterWhiteHero) then
+			self.CenterWhiteHero.ImageRUID = base.ThumnailRUID or ""
+			self.CenterWhiteHero.LocalPosition = Vector2(base.LocalX or 0, base.LocalY or 0)
+		end
+		if isvalid(self.CenterHeroText) then
+			self.CenterHeroText.Text = base.Name or ""
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshPartyDisplay()
+		-- 파티 슬롯 표시 갱신
+		local data = _HeroDataManager:GetInventoryData()
+		if data == nil then return end
+		local party = data.party or {}
+		
+		local slots = {
+			self.HeroGroup, self.HeroGroup1, self.HeroGroup2,
+			self.HeroGroup3, self.HeroGroup4,
+		}
+		
+		for _, slot in ipairs(slots) do
+			if isvalid(slot) then slot.Enable = false end
+		end
+		
+		for i, heroId in ipairs(party) do
+			local slot = slots[i]
+			if not isvalid(slot) then continue end
+		
+			local base = _HeroDataManager:GetHeroBaseData(heroId)
+			if base == nil then continue end
+		
+			local thumbEnt = slot:GetChildByName("HeroThumnail", true)
+			if isvalid(thumbEnt) then
+				local spr = thumbEnt:GetComponent(SpriteGUIRendererComponent)
+				if spr ~= nil then
+					spr.ImageRUID = base.PortraitRUID or ""
+				end
+			end
+		
+			local textEnt = slot:GetChildByName("UIText", true)
+			if isvalid(textEnt) then
+				local txt = textEnt:GetComponent(TextGUIRendererComponent)
+				if txt ~= nil then
+					txt.Text = base.Name or ""
+				end
+			end
+		
+			slot.Enable = true
+		end
+		
+		if isvalid(self.PartyCountText) then
+			self.PartyCountText.Text = tostring(#party) .. " / 5"
+		end
+		
+		if #party > 0 and not self._T.initialized then
+			self._T.initialized = true
+			self:SelectHeroSlot(1)
+		end
+	end
+
+end

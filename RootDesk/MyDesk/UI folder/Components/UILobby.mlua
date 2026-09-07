@@ -1,0 +1,9 @@
+@Component
+script UILobby extends Component
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- 로비 전체 초기화 로직 (추후 추가)
+	end
+
+end

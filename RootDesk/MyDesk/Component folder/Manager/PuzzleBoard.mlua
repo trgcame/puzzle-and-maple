@@ -1,0 +1,555 @@
+@Component
+script PuzzleBoard extends Component
+
+	property integer BoardRow = 5
+
+	property integer BoardColumn = 6
+
+	property table Puzzles = {}
+
+	property Vector2 TileSize = Vector2(0, 0)
+
+	property table TilePool = {}
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		if self.Entity.UITransformComponent == nil then
+			return
+		end
+		-- Board_UI(부모)의 SpriteGUIRenderer가 RaycastTarget=true(기본)이면 타일 터치를 막으므로 해제
+		local boardUI = self.Entity.Parent
+		if boardUI ~= nil and boardUI.SpriteGUIRendererComponent ~= nil then
+			boardUI.SpriteGUIRendererComponent.RaycastTarget = false
+		end
+		self:InitTilePool()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void InitTilePool()
+		-- 자식 타일 엔티티를 모두 찾아 풀에 저장
+		self.TilePool = {}
+		for row = 1, self.BoardRow do
+			for col = 1, self.BoardColumn do
+				local name = "Tile_R" .. row .. "_C" .. col
+				local tile = self.Entity:GetChildByName(name)
+				if tile ~= nil then
+					tile.UITransformComponent.anchoredPosition = Vector2(0, 9999)
+					table.insert(self.TilePool, tile)
+				end
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetPuzzles()
+		-- 기존 타일 전부 풀로 반환
+		self:ResetBoard()
+		
+		local deckTable = {}
+		local deckCount = _DataService:GetRowCount("PuzzleSet")
+		for i = 1, deckCount do
+			local spriteRUID = _DataService:GetCell("PuzzleSet", i, 1)
+			local elementType = _DataService:GetCell("PuzzleSet", i, 2)
+			table.insert(deckTable, {SpriteRUID = spriteRUID, ElementType = elementType})
+		end
+		
+		-- 초기 매치가 없도록 채움: 각 칸은 왼쪽 2칸(가로) / 위 2칸(세로)과
+		-- 같은 ElementType이 되어 3연속이 생기는 후보를 제외하고 선택
+		local puzzleTable = {}
+		for row = 1, self.BoardRow do
+			for col = 1, self.BoardColumn do
+				local i = (row - 1) * self.BoardColumn + col
+		
+				-- 3연속을 유발하는 금지 ElementType 수집
+				local banned = {}
+				if col >= 3 then
+					local a = puzzleTable[i - 1]
+					local b = puzzleTable[i - 2]
+					if a.ElementType == b.ElementType then
+						banned[a.ElementType] = true
+					end
+				end
+				if row >= 3 then
+					local a = puzzleTable[i - self.BoardColumn]
+					local b = puzzleTable[i - 2 * self.BoardColumn]
+					if a.ElementType == b.ElementType then
+						banned[a.ElementType] = true
+					end
+				end
+		
+				-- 금지되지 않은 후보 중에서 랜덤 선택
+				local candidates = {}
+				for d = 1, deckCount do
+					if not banned[deckTable[d].ElementType] then
+						table.insert(candidates, deckTable[d])
+					end
+				end
+				if #candidates == 0 then
+					candidates = deckTable
+				end
+		
+				local pick = candidates[_UtilLogic:RandomIntegerRange(1, #candidates)]
+				table.insert(puzzleTable, {SpriteRUID = pick.SpriteRUID, ElementType = pick.ElementType})
+			end
+		end
+		
+		-- 보드 크기 기준 타일 크기 계산
+		local boardSize = self.Entity.UITransformComponent.RectSize
+		self.TileSize = Vector2(boardSize.x / self.BoardColumn, boardSize.y / self.BoardRow)
+		
+		self:CreatePuzzleEntities(puzzleTable)
+	end
+
+	method void ResetBoard()
+		-- 그리드 내 모든 타일을 풀로 반환
+		for row = 1, self.BoardRow do
+			if self.Puzzles[row] ~= nil then
+				for col = 1, self.BoardColumn do
+					local tile = self.Puzzles[row][col]
+					if tile ~= nil then
+						tile.UITransformComponent.anchoredPosition = Vector2(0, 9999)
+						self:ReturnTileToPool(tile)
+					end
+				end
+			end
+		end
+		self.Puzzles = {}
+	end
+
+	@ExecSpace("ClientOnly")
+	method void CreatePuzzleEntities(table puzzleTable)
+		for i = 1, #puzzleTable do
+			local data = puzzleTable[i]
+			local col = ((i - 1) % self.BoardColumn) + 1
+			local row = math.floor((i - 1) / self.BoardColumn) + 1
+		
+			local tile = self:GetTileFromPool()
+			if tile == nil then
+				log_error("PuzzleBoard: 타일 풀 소진 — 타일 수가 부족합니다")
+				break
+			end
+		
+			-- 이미지 & 투명도 설정
+			tile.SpriteGUIRendererComponent.ImageRUID = DataRef(data.SpriteRUID)
+			tile.SpriteGUIRendererComponent.PreserveSprite = PreserveSpriteType.AspectOnly
+			tile.SpriteGUIRendererComponent.RaycastTarget = true
+			local c = tile.SpriteGUIRendererComponent.Color
+			c.a = 1
+			tile.SpriteGUIRendererComponent.Color = c
+		
+			-- 퍼즐 데이터 설정
+			tile.Puzzle.SpriteRUID = data.SpriteRUID
+			tile.Puzzle.ElementType = data.ElementType
+			tile.Puzzle.Row = row
+			tile.Puzzle.Column = col
+		
+			-- 그리드 위치 적용
+			tile.UITransformComponent.anchoredPosition = self:GetUIPosition(col, row)
+		
+			-- 배열 저장
+			if self.Puzzles[row] == nil then
+				self.Puzzles[row] = {}
+			end
+			self.Puzzles[row][col] = tile
+		end
+	end
+
+	method Entity GetTileFromPool()
+		if #self.TilePool > 0 then
+			return table.remove(self.TilePool, 1)
+		end
+		return nil
+	end
+
+	method void ReturnTileToPool(Entity tile)
+		tile.SpriteGUIRendererComponent.RaycastTarget = false
+		table.insert(self.TilePool, tile)
+	end
+
+	method Vector2 GetUIPosition(integer col, integer row)
+		-- 그리드 중앙 기준 anchoredPosition 반환
+		local xOffset = self.TileSize.x * (self.BoardColumn - 1) / 2
+		local yOffset = self.TileSize.y * (self.BoardRow - 1) / 2
+		return Vector2(-xOffset + (col - 1) * self.TileSize.x, yOffset - (row - 1) * self.TileSize.y)
+	end
+
+	method Vector2 GetGridFromUIPosition(Vector2 uiPos)
+		-- UI 좌표에서 그리드 (row, col) 반환 — Vector2(row, col)
+		local xOffset = self.TileSize.x * (self.BoardColumn - 1) / 2
+		local yOffset = self.TileSize.y * (self.BoardRow - 1) / 2
+		local col = math.floor((uiPos.x + xOffset) / self.TileSize.x + 0.5) + 1
+		local row = math.floor((yOffset - uiPos.y) / self.TileSize.y + 0.5) + 1
+		row = math.max(1, math.min(self.BoardRow, row))
+		col = math.max(1, math.min(self.BoardColumn, col))
+		return Vector2(row, col)
+	end
+
+	method void SwapPuzzle(Entity a, Entity b)
+		local aPuzzle = a.Puzzle
+		local bPuzzle = b.Puzzle
+		local ax = aPuzzle.Column
+		local ay = aPuzzle.Row
+		local bx = bPuzzle.Column
+		local by = bPuzzle.Row
+		-- 그리드 좌표 교환
+		aPuzzle.Column = bx
+		aPuzzle.Row = by
+		bPuzzle.Column = ax
+		bPuzzle.Row = ay
+		-- 배열 교환
+		self.Puzzles[ay][ax] = b
+		self.Puzzles[by][bx] = a
+		-- 드래그 중이 아닌 타일은 TweenLogic으로 부드럽게 이동
+		local currentDrag = _PuzzleLogic.CurrentDragPuzzle
+		if a ~= currentDrag then
+			local aStart = a.UITransformComponent.anchoredPosition
+			local aTarget = self:GetUIPosition(aPuzzle.Column, aPuzzle.Row)
+			_TweenLogic:PlayTween(aStart, aTarget, 0.15, EaseType.QuadEaseOut,
+				function(val)
+					a.UITransformComponent.anchoredPosition = val
+				end)
+		end
+		if b ~= currentDrag then
+			local bStart = b.UITransformComponent.anchoredPosition
+			local bTarget = self:GetUIPosition(bPuzzle.Column, bPuzzle.Row)
+			_TweenLogic:PlayTween(bStart, bTarget, 0.15, EaseType.QuadEaseOut,
+				function(val)
+					b.UITransformComponent.anchoredPosition = val
+				end)
+		end
+	end
+
+	method table CheckMatch()
+		local horizontalMatches = self:CheckHorizontal()
+		local verticalMatches = self:CheckVertical()
+		return self:MergeMatchGroup(horizontalMatches, verticalMatches)
+	end
+
+	method table CheckHorizontal()
+		local matchList = {}
+		for row = 1, self.BoardRow do
+			local currentGroup = {}
+			local currentType = nil
+			for col = 1, self.BoardColumn do
+				local puzzle = self.Puzzles[row][col]
+				if puzzle == nil then goto Branch end
+				local element = puzzle.Puzzle.ElementType
+				if currentType == nil then
+					currentType = element
+					table.insert(currentGroup, puzzle)
+				elseif currentType == element then
+					table.insert(currentGroup, puzzle)
+				else
+					if #currentGroup >= 3 then
+						table.insert(matchList, currentGroup)
+					end
+					currentGroup = {puzzle}
+					currentType = element
+				end
+				::Branch::
+			end
+			if #currentGroup >= 3 then
+				table.insert(matchList, currentGroup)
+			end
+		end
+		return matchList
+	end
+
+	method table CheckVertical()
+		local matchList = {}
+		for col = 1, self.BoardColumn do
+			local currentGroup = {}
+			local currentType = nil
+			for row = 1, self.BoardRow do
+				local puzzle = self.Puzzles[row][col]
+				if puzzle == nil then goto Branch end
+				local element = puzzle.Puzzle.ElementType
+				if currentType == nil then
+					currentType = element
+					table.insert(currentGroup, puzzle)
+				elseif currentType == element then
+					table.insert(currentGroup, puzzle)
+				else
+					if #currentGroup >= 3 then
+						table.insert(matchList, currentGroup)
+					end
+					currentGroup = {puzzle}
+					currentType = element
+				end
+				::Branch::
+			end
+			if #currentGroup >= 3 then
+				table.insert(matchList, currentGroup)
+			end
+		end
+		return matchList
+	end
+
+	method table MergeMatchGroup(table horizontalMatches, table verticalMatches)
+		local allGroups = {}
+		for _, group in ipairs(horizontalMatches) do
+			table.insert(allGroups, group)
+		end
+		for _, group in ipairs(verticalMatches) do
+			table.insert(allGroups, group)
+		end
+		
+		local mergedGroups = {}
+		while #allGroups > 0 do
+			local currentGroup = table.remove(allGroups, 1)
+			local merged = true
+			while merged do
+				merged = false
+				for i = #allGroups, 1, -1 do
+					local targetGroup = allGroups[i]
+					if self:HasCommonPuzzle(currentGroup, targetGroup) then
+						self:MergePuzzleTable(currentGroup, targetGroup)
+						table.remove(allGroups, i)
+						merged = true
+					end
+				end
+			end
+			table.insert(mergedGroups, self:CreateMatchGroup(currentGroup))
+		end
+		return mergedGroups
+	end
+
+	method boolean HasCommonPuzzle(table groupA, table groupB)
+		local lookup = {}
+		for _, puzzle in ipairs(groupA) do
+			lookup[puzzle] = true
+		end
+		for _, puzzle in ipairs(groupB) do
+			if lookup[puzzle] then return true end
+		end
+		return false
+	end
+
+	method void MergePuzzleTable(table groupA, table groupB)
+		local lookup = {}
+		for _, puzzle in ipairs(groupA) do
+			lookup[puzzle] = true
+		end
+		for _, puzzle in ipairs(groupB) do
+			if not lookup[puzzle] then
+				table.insert(groupA, puzzle)
+				lookup[puzzle] = true
+			end
+		end
+	end
+
+	method table CreateMatchGroup(table puzzleTable)
+		local enhancedCount = 0
+		for _, tile in ipairs(puzzleTable) do
+			if tile.Puzzle ~= nil and tile.Puzzle.IsEnhanced then
+				enhancedCount = enhancedCount + 1
+			end
+		end
+		return {
+			ElementType = puzzleTable[1].Puzzle.ElementType,
+			Count = #puzzleTable,
+			EnhancedCount = enhancedCount,
+			PuzzleTable = puzzleTable
+		}
+	end
+
+	@ExecSpace("ClientOnly")
+	method void EnhanceRandomPuzzles(number probability)
+		local threshold = math.floor(probability * 100)
+		for row = 1, self.BoardRow do
+			if self.Puzzles[row] == nil then continue end
+			for col = 1, self.BoardColumn do
+				local tile = self.Puzzles[row][col]
+				if not isvalid(tile) then continue end
+				local puzzle = tile.Puzzle
+				if puzzle == nil or puzzle.IsEnhanced then continue end
+				if _UtilLogic:RandomIntegerRange(1, 100) <= threshold then
+					puzzle:SetEnhanced(true)
+				end
+			end
+		end
+	end
+
+	method void ResetTurnPitch()
+		self._T.turnGroupCount = 0
+	end
+
+	method void RemoveMatchedPuzzle(table matchGroups, any onComplete, any onGroupRemoved)
+		if #matchGroups == 0 then
+			if onComplete then onComplete() end
+			return
+		end
+		
+		-- 모든 그리드 위치 먼저 비움 (Drop/Fill 로직용)
+		for _, group in ipairs(matchGroups) do
+			for _, puzzle in ipairs(group.PuzzleTable) do
+				self.Puzzles[puzzle.Puzzle.Row][puzzle.Puzzle.Column] = nil
+			end
+		end
+		
+		-- 그룹을 순서대로 한 개씩 페이드 아웃
+		local groupIndex = 1
+		local processNextGroup
+		processNextGroup = function()
+			if groupIndex > #matchGroups then
+				if onComplete then onComplete() end
+				return
+			end
+		
+			local group = matchGroups[groupIndex]
+			groupIndex = groupIndex + 1
+			self._T.turnGroupCount = (self._T.turnGroupCount or 0) + 1
+		
+			local groupSize = #group.PuzzleTable
+			if groupSize == 0 then
+				processNextGroup()
+				return
+			end
+		
+			local pitch = math.min(1.0 + (self._T.turnGroupCount - 1) * 0.05, 1.5)
+			local sc = self.Entity.SoundComponent
+			if sc ~= nil then
+				sc.AudioClipRUID = "8276266d69c24f30a33a5e01b65138e6"
+				sc.Volume = 1.0
+				sc.Pitch = pitch
+				sc:Play()
+			else
+				_SoundService:PlaySound("8276266d69c24f30a33a5e01b65138e6", 1.0)
+			end
+			if onGroupRemoved then onGroupRemoved() end
+		
+			local doneCount = 0
+			for _, puzzle in ipairs(group.PuzzleTable) do
+				local fadeTween = _TweenLogic:MakeTween(1, 0, 0.3, EaseType.Linear,
+					function(alpha)
+						local color = puzzle.SpriteGUIRendererComponent.Color
+						color.a = alpha
+						puzzle.SpriteGUIRendererComponent.Color = color
+					end)
+				fadeTween:SetOnEndCallback(function()
+					puzzle.UITransformComponent.anchoredPosition = Vector2(0, 9999)
+					self:ReturnTileToPool(puzzle)
+					doneCount = doneCount + 1
+					if doneCount == groupSize then
+						processNextGroup()
+					end
+				end)
+				fadeTween:Play()
+			end
+		end
+		
+		processNextGroup()
+	end
+
+	method void DropPuzzle(any onComplete)
+		local tweenCount = 0
+		
+		for col = 1, self.BoardColumn do
+			local writeRow = self.BoardRow
+			for row = self.BoardRow, 1, -1 do
+				local puzzle = self.Puzzles[row][col]
+				if puzzle ~= nil then
+					if row ~= writeRow then
+						self.Puzzles[writeRow][col] = puzzle
+						self.Puzzles[row][col] = nil
+						puzzle.Puzzle.Row = writeRow
+						puzzle.Puzzle.Column = col
+		
+						local startPos = puzzle.UITransformComponent.anchoredPosition
+						local targetPos = self:GetUIPosition(col, writeRow)
+						tweenCount = tweenCount + 1
+						local dropTween = _TweenLogic:PlayTween(startPos, targetPos, 0.3, EaseType.Linear,
+							function(val)
+								puzzle.UITransformComponent.anchoredPosition = val
+							end)
+						dropTween:SetOnEndCallback(function()
+							tweenCount = tweenCount - 1
+							if tweenCount == 0 and onComplete ~= nil then
+								onComplete()
+							end
+						end)
+					end
+					writeRow = writeRow - 1
+				end
+			end
+		end
+		
+		if tweenCount == 0 and onComplete ~= nil then
+			onComplete()
+		end
+	end
+
+	method void FillPuzzle(any onComplete)
+		local tweenCount = 0
+		
+		local deckTable = {}
+		local deckCount = _DataService:GetRowCount("PuzzleSet")
+		for i = 1, deckCount do
+			local spriteRUID = _DataService:GetCell("PuzzleSet", i, 1)
+			local elementType = _DataService:GetCell("PuzzleSet", i, 2)
+			table.insert(deckTable, {spriteRUID = spriteRUID, elementType = elementType})
+		end
+		
+		local topRowY = self.TileSize.y * (self.BoardRow - 1) / 2
+		
+		for col = 1, self.BoardColumn do
+			-- 이 열의 빈 슬롯 수만큼만 위에서 시작 (1칸 비면 1칸 위, 5칸 비면 5칸 위)
+			local emptyCount = 0
+			for row = 1, self.BoardRow do
+				if self.Puzzles[row][col] == nil then
+					emptyCount = emptyCount + 1
+				end
+			end
+		
+			local emptyIndex = emptyCount
+			for row = 1, self.BoardRow do
+				if self.Puzzles[row][col] == nil then
+					local idx = _UtilLogic:RandomIntegerRange(1, #deckTable)
+					local data = deckTable[idx]
+		
+					local tile = self:GetTileFromPool()
+					if tile == nil then
+						log_error("FillPuzzle: 타일 풀 소진")
+						continue
+					end
+		
+					-- 타일 데이터 설정
+					tile.SpriteGUIRendererComponent.ImageRUID = DataRef(data.spriteRUID)
+					tile.SpriteGUIRendererComponent.PreserveSprite = PreserveSpriteType.AspectOnly
+					tile.SpriteGUIRendererComponent.RaycastTarget = true
+					local c = tile.SpriteGUIRendererComponent.Color
+					c.a = 1
+					tile.SpriteGUIRendererComponent.Color = c
+					tile.Puzzle.SpriteRUID = data.spriteRUID
+					tile.Puzzle.ElementType = data.elementType
+					tile.Puzzle.Row = row
+					tile.Puzzle.Column = col
+					self.Puzzles[row][col] = tile
+		
+					-- 빈 칸 수 기준으로 1칸씩 차이나는 시작 위치
+					local targetPos = self:GetUIPosition(col, row)
+					local startPos = Vector2(targetPos.x, topRowY + emptyIndex * self.TileSize.y)
+					tile.UITransformComponent.anchoredPosition = startPos
+					emptyIndex = emptyIndex - 1
+		
+					tweenCount = tweenCount + 1
+					local fillTween = _TweenLogic:PlayTween(startPos, targetPos, 0.5, EaseType.QuadEaseIn,
+						function(val)
+							tile.UITransformComponent.anchoredPosition = val
+						end)
+					fillTween:SetOnEndCallback(function()
+						tweenCount = tweenCount - 1
+						if tweenCount == 0 and onComplete ~= nil then
+							onComplete()
+						end
+					end)
+				end
+			end
+		end
+		
+		if tweenCount == 0 and onComplete ~= nil then
+			onComplete()
+		end
+	end
+
+end

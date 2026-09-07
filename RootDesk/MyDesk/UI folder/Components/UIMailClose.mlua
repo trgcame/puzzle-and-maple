@@ -1,0 +1,13 @@
+@Component
+script UIMailClose extends Component
+
+	@EventSender("Self")
+	handler HandleButtonClickEvent(ButtonClickEvent event)
+		--------------- Native Event Sender Info ----------------
+		-- Sender: ButtonComponent
+		-- Space: Client
+		---------------------------------------------------------
+		_MailUI:Close()
+	end
+
+end

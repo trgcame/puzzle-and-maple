@@ -1,0 +1,273 @@
+@Logic
+script MailUI extends Logic
+
+	-- 우편함 화면 컨트롤러
+	--
+	-- ⚠️ `ui/Mail.ui`는 **사용자가 Maker에서 이미지를 직접 손본 파일**이다.
+	--    수정은 `UIBuilder.load` + 부분 patch만 — 빌드 스크립트를 다시 돌리면 그 작업이 통째로 날아간다.
+	--
+	-- 구조 규칙은 `EnhanceUI`·`RankingUI`와 같다:
+	--   · 루트 UUID 하나만 프로퍼티로 받고 나머지는 **경로 조회**(`_Find`)로 찾는다
+	--     → `.ui`를 다시 빌드해도 자식 UUID가 바뀌면서 배선이 끊기지 않는다
+	--   · 패널은 `DefaultShow=false`라 자식이 `OnBeginPlay` 때 안 잡힌다
+	--     → 첫 `Open()`에서 `_EnsureBound()`로 지연 연결
+	--
+	-- 목록은 `.ui`에 미리 만들어 둔 **행을 채우고 남는 칸은 숨기는** 방식이다.
+	-- GridView 가상 스크롤(랭킹 방식)은 `ItemEntity`를 런타임에 주입해야 해서 임시 화면에는 과하다.
+	--
+	-- ⚠️ **`RowCount` · `.ui`의 실제 행 수 · `MailManager.MaxMailSlots` 셋이 같아야 한다.**
+	--    행이 더 적으면 그 위의 우편은 **스크롤해도 안 보인다** — 스크롤이 있다고 무제한이 아니다.
+	--    지금은 셋 다 50이라 상한까지 전부 보인다. 바꿀 때는 빌드 스크립트의 `ROWS`도 함께 고칠 것.
+
+	property Entity panel = "3002d310-b1fd-4aab-9c98-1efee2ef5dd4"
+
+	property integer RowCount = 50
+
+	method void OnBeginPlay()
+		self._T.bound = false
+		self._T.open  = false
+		if isvalid(self.panel) then self.panel.Enable = false end
+		log("[MailUI] 초기화 완료 — 패널 내부는 첫 Open에서 연결")
+	end
+
+	@ExecSpace("ClientOnly")
+	method Entity _Find(string path)
+		-- ⚠️ `GetChildByName`은 경로를 못 받는다("A/B"를 통째로 넘기면 항상 nil).
+		--    재귀 검색(true)은 트리 어디의 동명 엔티티든 먼저 걸린 것을 반환해 위험하다.
+		--    그래서 구간을 잘라 **직계로 한 단계씩** 내려간다. (As-built 상시 이슈)
+		-- ⚠️ 경로는 **루트(`/ui/Mail`) 기준**이다. 실제 트리가 `BackGround/Window/...`라
+		--    `BackGround`를 빼먹으면 nil이 돌아오고, 호출부의 `isvalid` 가드에 걸려
+		--    **오류 없이 표시만 안 바뀐다**(첫 구현에서 실제로 이렇게 놓쳤다).
+		if not isvalid(self.panel) then return nil end
+		local cur = self.panel
+		for seg in string.gmatch(path, "[^/]+") do
+			if not isvalid(cur) then return nil end
+			cur = cur:GetChildByName(seg, false)
+		end
+		return cur
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _EnsureBound()
+		if self._T.bound == true then return end
+		self._T.bound = true
+		log("[MailUI] 패널 내부 연결 완료")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Open()
+		if not isvalid(self.panel) then
+			log_warning("[MailUI] panel 프로퍼티가 비어 있다 — .ui 재빌드 후 bind가 안 됐는지 확인")
+			return
+		end
+		self.panel.Enable = true
+		self._T.open = true
+		self:_EnsureBound()
+		-- 서버에서 최신 목록을 받아온다. 응답(`MailManager:ReceiveMailbox`)이 Refresh를 부른다.
+		_MailManager:RequestMailbox()
+		self:Refresh()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Close()
+		self._T.open = false
+		if isvalid(self.panel) then self.panel.Enable = false end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _SetText(Entity ent, string value)
+		if not isvalid(ent) then return end
+		-- ⚠️ 이 프로젝트의 UI에는 `TextGUIRendererComponent`와 `TextComponent`가 **섞여 있다.**
+		--    한쪽만 보면 nil 가드에 걸려 오류 없이 표시만 죽는다(전투 HUD 이름이 그랬다).
+		local t = ent.TextGUIRendererComponent
+		if t ~= nil then t.Text = value return end
+		local t2 = ent.TextComponent
+		if t2 ~= nil then t2.Text = value return end
+		log_warning("[MailUI] 텍스트 컴포넌트를 찾을 수 없다: " .. tostring(ent.Name))
+	end
+
+	@ExecSpace("ClientOnly")
+	method string _Comma(integer v)
+		-- 1234567 → "1,234,567". 첨부 칸이 좁아 자릿수를 읽기 쉽게 끊는다.
+		local s = tostring(math.floor(v))
+		local out = s
+		while true do
+			local rep
+			out, rep = string.gsub(out, "^(%-?%d+)(%d%d%d)", "%1,%2")
+			if rep == 0 then break end
+		end
+		return out
+	end
+
+	@ExecSpace("ClientOnly")
+	method string _CountText(integer v)
+		-- 아이콘 한 칸이 46px뿐이라 "100,000"처럼 길어지면 **옆 슬롯의 숫자와 겹친다.**
+		-- 만 단위부터는 한국식으로 줄여 폭을 4~5글자로 묶는다(100000 → "10만", 25000 → "2.5만").
+		local n = math.floor(tonumber(v) or 0)
+		if n >= 10000 then
+			if n % 10000 == 0 then return tostring(math.floor(n / 10000)) .. "만" end
+			return string.format("%.1f만", n / 10000)
+		end
+		return self:_Comma(n)
+	end
+
+	@ExecSpace("ClientOnly")
+	method table _RewardIcons(table m)
+		-- 첨부를 **아이콘 슬롯 목록**으로 바꾼다.
+		-- 아이콘 RUID는 로비 헤더(`Lobby.ui` Header/Gold·Diamond·Ticket)에서 쓰는 것과 같은 것을 재사용한다.
+		--
+		-- ⚠️ 슬롯은 **3칸뿐인데 첨부 종류는 4종**(메소·결정석·티켓·영웅)이다.
+		--    넷을 다 담은 우편은 드물다는 전제로 3칸으로 줄였고(사용자 결정), 넘치면 뒤가 잘린다.
+		--    그래서 **영웅을 맨 앞**에 둔다 — 잘려야 한다면 값이 싼 재화 쪽이 잘려야 한다.
+		local out = {}
+		local heroId = m.heroId or ""
+		if heroId ~= "" then
+			-- 영웅은 `HeroSet`의 상반신 초상(`PortraitRUID`)을 아이콘으로 쓴다(`EnhanceUI:_SetPortrait`와 같은 값).
+			-- CSV에 없는 heroId면 빈 RUID = 보이지 않는 슬롯이 되므로 아예 넣지 않는다.
+			local base = _HeroDataManager:GetHeroBaseData(heroId)
+			if base ~= nil and (base.PortraitRUID or "") ~= "" then
+				table.insert(out, { ruid = base.PortraitRUID, count = "1" })
+			end
+		end
+		if (tonumber(m.gold)   or 0) > 0 then table.insert(out, { ruid = "fd255d50cb5177545a0e71c4a84363c7", count = self:_CountText(m.gold)   }) end
+		if (tonumber(m.stone)  or 0) > 0 then table.insert(out, { ruid = "45820819ebec483fb5cc98b7ccb420f1", count = self:_CountText(m.stone)  }) end
+		if (tonumber(m.ticket) or 0) > 0 then table.insert(out, { ruid = "059ccd33e9ff4fcbbeaf69329205fb45", count = self:_CountText(m.ticket) }) end
+		return out
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _FillRewards(string base, table m)
+		-- 첨부 슬롯 3칸을 채우고 남는 칸은 끈다.
+		-- ⚠️ 이 `3`은 `.ui`의 `Slot1~3`과 **개수가 같아야 한다** — 늘리려면 양쪽을 함께 고칠 것.
+		-- 슬롯은 3층 구조다: `SlotN`(프레임) › `Icon`(아이템 이미지) + `Count`(갯수).
+		-- ⚠️ 아이템 RUID는 **`Icon` 자식**에 넣는다 — 슬롯 자신에 넣으면 프레임이 아이템으로 덮인다.
+		-- 수령한 우편도 아이콘은 그대로 둔다 — 무엇을 받았는지 보이는 편이 낫고,
+		-- 행 전체가 CanvasGroup으로 흐려지므로 미수령과 헷갈리지 않는다.
+		local icons = self:_RewardIcons(m)
+		for s = 1, 3 do
+			local path = base .. "/Reward/Slot" .. tostring(s)
+			local slot = self:_Find(path)
+			if isvalid(slot) then
+				local d = icons[s]
+				if d == nil then
+					slot.Enable = false
+				else
+					slot.Enable = true
+					local icon = self:_Find(path .. "/Icon")
+					if isvalid(icon) then
+						local spr = icon.SpriteGUIRendererComponent
+						if spr ~= nil then spr.ImageRUID = d.ruid end
+					end
+					self:_SetText(self:_Find(path .. "/Count"), d.count)
+				end
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method string _RemainText(table m)
+		-- 남은 보관 기간. `expireAt`은 절대 시각(epoch 초)이고 0이면 무기한이다.
+		local exp = tonumber(m.expireAt) or 0
+		if exp <= 0 then return "무기한" end
+		local left = exp - os.time()
+		if left <= 0 then return "만료" end
+		local d = math.floor(left / 86400)
+		local h = math.floor((left % 86400) / 3600)
+		if d > 0 then return tostring(d) .. "일 " .. tostring(h) .. "시간" end
+		if h > 0 then return tostring(h) .. "시간" end
+		return tostring(math.max(1, math.floor(left / 60))) .. "분"
+	end
+
+	@ExecSpace("ClientOnly")
+	method table _DisplayOrder()
+		-- 수령한 우편은 목록 **맨 아래**로 내린다. 같은 그룹 안에서는 서버가 준 순서를 유지한다.
+		-- 서버 배열을 직접 정렬하지 않고 표시용 배열을 따로 만든다 — `RequestClaim`은 `mail.id`로
+		-- 판정하므로 서버 순서를 건드릴 이유가 없고, 건드리면 `MailManager`의 상태와 어긋난다.
+		local mails = _MailManager:GetMails()
+		local out = {}
+		for _, m in ipairs(mails) do
+			if m.claimed ~= true then table.insert(out, m) end
+		end
+		for _, m in ipairs(mails) do
+			if m.claimed == true then table.insert(out, m) end
+		end
+		return out
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Refresh()
+		if not isvalid(self.panel) then return end
+		local mails = self:_DisplayOrder()
+		-- ⚠️ 행 클릭이 몇 번째 우편인지 볼 때는 **반드시 이 표시 순서**를 봐야 한다.
+		--    `GetMails()`의 순서와 다르기 때문에 그쪽을 인덱싱하면 엉뚱한 우편을 수령한다.
+		self._T.order = mails
+		local shown = math.min(#mails, self.RowCount)
+
+		local empty = self:_Find("BackGround/Window/EmptyNote")
+		if isvalid(empty) then empty.Enable = (#mails == 0) end
+
+		self:_SetText(self:_Find("BackGround/Window/CountText"),
+			"보관 우편 " .. tostring(#mails) .. " / " .. tostring(_MailManager.MaxMailSlots))
+
+		for i = 1, self.RowCount do
+			local base = "BackGround/Window/List/Row" .. tostring(i)
+			local row  = self:_Find(base)
+			if isvalid(row) then
+				if i <= shown then
+					local m = mails[i]
+					row.Enable = true
+					local claimed = (m.claimed == true)
+					self:_SetText(self:_Find(base .. "/Title"),  tostring(m.title or "(제목 없음)"))
+					self:_SetText(self:_Find(base .. "/Sender"), tostring(m.sender or "운영자"))
+					self:_SetText(self:_Find(base .. "/Remain"), self:_RemainText(m))
+					self:_FillRewards(base, m)
+					-- 이미 받은 우편은 [받기] 버튼을 감춘다(누를 게 없으니 헷갈리지 않게).
+					local btn = self:_Find(base .. "/ClaimBtn" .. tostring(i))
+					if isvalid(btn) then btn.Enable = not claimed end
+					-- 수령 완료 = 반투명. 자식을 하나씩 칠하는 대신 `CanvasGroup` 하나로 묶어 낮춘다.
+					local cg = row.CanvasGroupComponent
+					if cg ~= nil then
+						if claimed then cg.GroupAlpha = 0.45 else cg.GroupAlpha = 1.0 end
+					end
+				else
+					row.Enable = false
+				end
+			end
+		end
+		log("[MailUI] 갱신 — 총 " .. tostring(#mails) .. "통 · 표시 " .. tostring(shown) .. "칸")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnClickRow(integer index)
+		-- ⚠️ `GetMails()`가 아니라 **표시 순서**(`_T.order`)를 본다.
+		--    수령한 우편을 아래로 내리면서 두 순서가 어긋났기 때문이다(`_DisplayOrder` 참조).
+		local order = self._T.order or {}
+		local m = order[index]
+		if m == nil then return end
+		if m.claimed == true then
+			_UIToast:ShowMessage("이미 수령한 우편입니다.")
+			return
+		end
+		_MailManager:RequestClaim(tostring(m.id))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnClickDeleteClaimed()
+		-- 헛된 서버 호출을 막는 사전 확인일 뿐이다. **실제 판정은 서버가 한다.**
+		if _MailManager:GetClaimedCount() <= 0 then
+			_UIToast:ShowMessage("삭제할 우편이 없습니다.")
+			return
+		end
+		_MailManager:RequestDeleteClaimed()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnClickClaimAll()
+		if _MailManager:GetUnclaimedCount() <= 0 then
+			_UIToast:ShowMessage("받을 우편이 없습니다.")
+			return
+		end
+		_MailManager:RequestClaimAll()
+	end
+
+end

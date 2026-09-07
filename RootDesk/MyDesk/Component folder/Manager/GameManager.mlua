@@ -1,0 +1,18 @@
+@Component
+script GameManager extends Component
+
+	property StageManager StageManager = "5ec7106b-c6f7-461f-932f-45d9a504f1ba"
+
+	property CurrencyManager CurrencyManager = "2eb2fe06-342b-43dd-bcd0-feb6eae3550c"
+
+	method void StartRun()
+		_HeroDataManager:InitPartyHP()
+		local nextStage = 1
+		if isvalid(self.CurrencyManager) then
+			nextStage = self.CurrencyManager:GetMaxClearedStage() + 1
+		end
+		-- 그룹은 스테이지 번호에서 계산한다(예전에는 1로 하드코딩돼 있어 5그룹을 넣어도 전부 1그룹만 돌았다).
+		self.StageManager:StartStage(nextStage, self.StageManager:GetGroupIdForStage(nextStage))
+	end
+
+end

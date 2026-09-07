@@ -1,0 +1,16 @@
+@Component
+script UINextFloor extends Component
+
+	@EventSender("Self")
+	handler HandleButtonClickEvent(ButtonClickEvent event)
+		--------------- Native Event Sender Info ----------------
+		-- Sender: ButtonComponent
+		-- Space: Client
+		---------------------------------------------------------
+		local stageEnt = _EntityService:GetEntityByPath("/common/Manager/StageManager")
+		if isvalid(stageEnt) then
+			stageEnt.StageManager:NextFloor()
+		end
+	end
+
+end

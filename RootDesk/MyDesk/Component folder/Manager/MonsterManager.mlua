@@ -1,0 +1,755 @@
+@Component
+script MonsterManager extends Component
+
+	property Entity MonsterPartyPanel = "f2395ea3-790e-4925-bc27-f73144e5cb5b"
+
+	property Entity BossSlotPanel = "990fd709-a5e6-4332-ad47-7cc4aee5c0db"
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		self._T.monsters    = {}
+		self._T.monsterPool = {}
+		self:LoadMonsterData()
+		self:LoadStageCurve()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void LoadStageCurve()
+		-- 난이도 곡선 파라미터. 25행짜리 표 대신 **공식 설정 1행 + 코드 계산** 패턴이라
+		-- 스테이지 수가 몇천이 되어도 CSV는 1행이면 된다.
+		-- ⚠️ 이 기본값은 CSV 로드 실패 시의 폴백이므로 **StageCurveSet.csv와 항상 같이 고쳐야 한다.**
+		local c = {
+			hpBase = 1350, hpPerFloor = 45,  hpGrowth = 1.002007,
+			atkBase = 30,  atkPerFloor = 0.2, atkGrowth = 1.002007,
+			defBase = 2,   defPerFloor = 0.01,
+		}
+		local count = _DataService:GetRowCount("StageCurveSet")
+		for i = 1, count do
+			if _DataService:GetCell("StageCurveSet", i, "CurveId") == "default" then
+				c.hpBase      = tonumber(_DataService:GetCell("StageCurveSet", i, "HpBase"))      or c.hpBase
+				c.hpPerFloor  = tonumber(_DataService:GetCell("StageCurveSet", i, "HpPerFloor"))  or c.hpPerFloor
+				c.hpGrowth    = tonumber(_DataService:GetCell("StageCurveSet", i, "HpGrowth"))    or c.hpGrowth
+				c.atkBase     = tonumber(_DataService:GetCell("StageCurveSet", i, "AtkBase"))     or c.atkBase
+				c.atkPerFloor = tonumber(_DataService:GetCell("StageCurveSet", i, "AtkPerFloor")) or c.atkPerFloor
+				c.atkGrowth   = tonumber(_DataService:GetCell("StageCurveSet", i, "AtkGrowth"))   or c.atkGrowth
+				c.defBase     = tonumber(_DataService:GetCell("StageCurveSet", i, "DefBase"))     or c.defBase
+				c.defPerFloor = tonumber(_DataService:GetCell("StageCurveSet", i, "DefPerFloor")) or c.defPerFloor
+				break
+			end
+		end
+		self._T.curve = c
+		log("[MonsterManager] StageCurveSet 로드 — HP " .. tostring(c.hpBase) .. "+" .. tostring(c.hpPerFloor)
+			.. "/층 ×" .. tostring(c.hpGrowth) .. "^층 · ATK " .. tostring(c.atkBase) .. "+" .. tostring(c.atkPerFloor)
+			.. "/층 ×" .. tostring(c.atkGrowth) .. "^층")
+	end
+
+	@ExecSpace("ClientOnly")
+	method table CalcBaseStats(integer floor)
+		-- 이 층의 몬스터 기준 스탯. **`Init`과 `SummonMinions`가 반드시 이걸 함께 쓴다** —
+		-- 예전에는 같은 공식이 두 곳에 복붙돼 있어 한쪽만 고치면 소환된 부하의 스탯이 어긋났다.
+		--
+		-- ⚠️ `Growth`는 지수 항이라 층수에 매우 민감하다(2500제곱). 소수점 4째 자리만 건드려도
+		--    종점이 배로 바뀌니 **`StageCurveSet.csv`를 고칠 때는 반드시 2500층 값을 다시 계산할 것.**
+		--
+		-- 설계 기준은 **실측 피해량**이다(추정 금지 — 콤보가 곱연산이라 눈대중이 몇 배씩 빗나간다).
+		--    8콤보 1턴 파티 총 피해: ★1 0강 **1,916** / ★5 25강 **3,451,690** (= 실전력 ×1,801).
+		--    여기에 "1스테이지 3턴 · 500스테이지 20턴에 한 층 클리어"를 걸면 몬스터 HP는
+		--    1층 1,590 → 2500층 17,108,889(**×12,240**)이 나온다. 이 곡선이 그 값이다.
+		local c = self._T.curve
+		if c == nil then
+			return { hp = math.floor(1350 + floor * 45), atk = math.floor(30 + floor * 0.2), def = math.floor(2 + floor * 0.01) }
+		end
+		local f = floor or 1
+		local hp  = (c.hpBase  + f * c.hpPerFloor)
+		local atk = (c.atkBase + f * c.atkPerFloor)
+		-- `math.pow`는 Lua 버전에 따라 없을 수 있어 `^` 연산자를 쓴다.
+		if c.hpGrowth  ~= 1.0 then hp  = hp  * (c.hpGrowth  ^ f) end
+		if c.atkGrowth ~= 1.0 then atk = atk * (c.atkGrowth ^ f) end
+		return {
+			hp  = math.floor(hp),
+			atk = math.floor(atk),
+			def = math.floor(c.defBase + f * c.defPerFloor),
+		}
+	end
+
+	@ExecSpace("ClientOnly")
+	method void LoadMonsterData()
+		self._T.monsterDataById = {}
+		local count = _DataService:GetRowCount("MonsterSet")
+		for i = 1, count do
+			local stageType = _DataService:GetCell("MonsterSet", i, "StageType")
+			local mid       = _DataService:GetCell("MonsterSet", i, "MonsterId")
+			if stageType == nil or mid == nil or mid == "" then continue end
+			if self._T.monsterPool[stageType] == nil then
+				self._T.monsterPool[stageType] = {}
+			end
+			local md = {
+				monsterId    = mid,
+				name         = _DataService:GetCell("MonsterSet", i, "Name"),
+				spriteRUID   = _DataService:GetCell("MonsterSet", i, "SpriteRUID"),
+				attackRUID   = _DataService:GetCell("MonsterSet", i, "AttackRUID"),
+				attackEffect = _DataService:GetCell("MonsterSet", i, "AttackEffect") or "",
+				attackSound  = _DataService:GetCell("MonsterSet", i, "AttackSound")  or "",
+				hitRUID      = _DataService:GetCell("MonsterSet", i, "HitRUID"),
+				dieRUID      = _DataService:GetCell("MonsterSet", i, "DieRUID"),
+				hpMult       = tonumber(_DataService:GetCell("MonsterSet", i, "HPMult"))  or 1.0,
+				atkMult      = tonumber(_DataService:GetCell("MonsterSet", i, "ATKMult")) or 1.0,
+				defMult      = tonumber(_DataService:GetCell("MonsterSet", i, "DEFMult")) or 0.0,
+				scale        = tonumber(_DataService:GetCell("MonsterSet", i, "Scale"))   or 1.0,
+				attackTarget = _DataService:GetCell("MonsterSet", i, "AttackTarget")      or "all",
+			}
+			table.insert(self._T.monsterPool[stageType], md)
+			self._T.monsterDataById[mid] = md
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Init(table nodeData)
+		self._T.monsters  = {}
+		self._T.battleGen = (self._T.battleGen or 0) + 1
+		local floor     = nodeData.Floor or 1
+		local stageType = nodeData.Type  or "Battle"
+
+		local base    = self:CalcBaseStats(floor)
+		local hpBase  = base.hp
+		local atkBase = base.atk
+		local defBase = base.def
+		
+		-- 모든 슬롯 숨기기
+		if isvalid(self.MonsterPartyPanel) then
+			for n = 1, 5 do
+				local s = self.MonsterPartyPanel:GetChildByName("MonsterSlot" .. n, false)
+				if isvalid(s) then s.Enable = false end
+			end
+		end
+		if isvalid(self.BossSlotPanel) then
+			local bossSlot = self.BossSlotPanel:GetChildByName("BossSlot", false)
+			if isvalid(bossSlot) then bossSlot.Enable = false end
+			for n = 1, 2 do
+				local ms = self.BossSlotPanel:GetChildByName("MinionSlot" .. n, false)
+				if isvalid(ms) then ms.Enable = false end
+			end
+		end
+		
+		-- 보스 여부에 따라 패널 토글
+		local isBoss = (stageType == "Boss")
+		self._T.isBossFloor = isBoss
+		if isvalid(self.MonsterPartyPanel) then self.MonsterPartyPanel.Enable = not isBoss end
+		if isvalid(self.BossSlotPanel) then self.BossSlotPanel.Enable = isBoss end
+		
+		local allSlots = self:GetSlots()
+		
+		-- spawnList: { md = monsterData, slotIdx = integer } 쌍의 배열
+		local spawnList = {}
+		if nodeData.Monsters ~= nil and #nodeData.Monsters > 0 then
+			for _, entry in ipairs(nodeData.Monsters) do
+				local md = self._T.monsterDataById and self._T.monsterDataById[entry.monsterId]
+				if md ~= nil then
+					if entry.slots ~= nil and #entry.slots > 0 then
+						-- CSV에서 슬롯 위치 지정됨
+						for _, slotIdx in ipairs(entry.slots) do
+							table.insert(spawnList, { md = md, slotIdx = slotIdx })
+						end
+					else
+						-- 구 포맷 폴백: count 기반 순차 배정
+						for i = 1, (entry.count or 1) do
+							table.insert(spawnList, { md = md, slotIdx = nil })
+						end
+					end
+				else
+					log_warning("[MonsterManager] 알 수 없는 monsterId=" .. tostring(entry.monsterId))
+				end
+			end
+		else
+			local pool = self._T.monsterPool[stageType]
+			if pool == nil or #pool == 0 then
+				pool = self._T.monsterPool["Battle"] or {}
+			end
+			for i = 1, math.min(#pool, 5) do
+				table.insert(spawnList, { md = pool[i], slotIdx = nil })
+			end
+		end
+		
+		-- slotIdx 오름차순 정렬: 작은 슬롯번호 = 전방, 큰 슬롯번호 = 후방
+		table.sort(spawnList, function(a, b)
+			return (a.slotIdx or 99) < (b.slotIdx or 99)
+		end)
+		
+		local count = math.min(#spawnList, #allSlots)
+		for i = 1, count do
+			local entry   = spawnList[i]
+			local md      = entry.md
+			local slotIdx = entry.slotIdx or i
+			local hp      = math.floor(hpBase  * md.hpMult)
+			local atk     = math.floor(atkBase * md.atkMult)
+			local def     = math.floor(defBase * md.defMult)
+		
+			self._T.monsters[i] = {
+				hp           = hp,
+				maxHp        = hp,
+				atk          = atk,
+				def          = def,
+				alive        = true,
+				name         = md.name,
+				monsterId    = md.monsterId,
+				spriteRUID   = md.spriteRUID   or "",
+				attackRUID   = md.attackRUID   or "",
+				attackEffect = md.attackEffect or "",
+				attackSound  = md.attackSound  or "",
+				hitRUID      = md.hitRUID      or "",
+				dieRUID      = md.dieRUID      or "",
+				attackTarget = md.attackTarget or "all",
+				slotIdx      = slotIdx,
+			}
+		
+			local slot = allSlots[slotIdx]
+			if isvalid(slot) then
+				slot.Enable = true
+				self:ApplySpriteToSlot(i, md.spriteRUID)
+				self:ApplyScaleToSlot(i, md.scale or 1.0)
+				self:RefreshSlotHPUI(i)
+				local nameEnt = slot:GetChildByName("txtMonsterName", true)
+				if isvalid(nameEnt) then
+					nameEnt.TextGUIRendererComponent.Text = md.name
+				end
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method table GetSlots()
+		if self._T.isBossFloor then
+			if not isvalid(self.BossSlotPanel) then return {} end
+			local result = {}
+			local bossSlot = self.BossSlotPanel:GetChildByName("BossSlot", false)
+			if isvalid(bossSlot) then table.insert(result, bossSlot) end
+			for n = 1, 2 do
+				local ms = self.BossSlotPanel:GetChildByName("MinionSlot" .. n, false)
+				if isvalid(ms) then table.insert(result, ms) end
+			end
+			return result
+		end
+		if not isvalid(self.MonsterPartyPanel) then return {} end
+		local result = {}
+		for n = 1, 5 do
+			local s = self.MonsterPartyPanel:GetChildByName("MonsterSlot" .. n, false)
+			if isvalid(s) then table.insert(result, s) end
+		end
+		return result
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SummonMinions(string monsterId, integer count, table nodeData)
+		local md = self._T.monsterDataById and self._T.monsterDataById[monsterId]
+		if md == nil then
+			log_warning("[MonsterManager] SummonMinions: 알 수 없는 monsterId=" .. tostring(monsterId))
+			return
+		end
+		local floor   = nodeData and (nodeData.Floor or 1) or 1
+		local base    = self:CalcBaseStats(floor)   -- Init과 같은 공식을 쓴다(예전엔 복붙이었다)
+		local hpBase  = base.hp
+		local atkBase = base.atk
+		local defBase = base.def
+		local allSlots = self:GetSlots()
+		local processed = 0
+		for slotIdx = 2, #allSlots do
+			if processed >= count then break end
+			-- 이 슬롯을 이전에 사용한 몬스터 찾기 (생사 불문)
+			local existingIdx = nil
+			if self._T.monsters ~= nil then
+				for i, m in ipairs(self._T.monsters) do
+					if m.slotIdx == slotIdx then existingIdx = i; break end
+				end
+			end
+			if existingIdx ~= nil then
+				local m = self._T.monsters[existingIdx]
+				if m.alive then
+					-- 살아있음 → HP 최대 충전만 (이번 턴도 공격 가능)
+					m.hp = m.maxHp
+					self:RefreshSlotHPUI(existingIdx)
+					log("[MonsterManager] 미니언 HP 충전 slotIdx=" .. slotIdx)
+				else
+					-- 사망 → 부활 + HP 충전
+					local hp = math.floor(hpBase * md.hpMult)
+					m.hp    = hp
+					m.maxHp = hp
+					m.alive = true
+					m.newlySpawned = true
+					local slot = allSlots[slotIdx]
+					if isvalid(slot) then
+						slot.Enable = true
+						self:ApplySpriteToSlot(existingIdx, md.spriteRUID)
+						self:ApplyScaleToSlot(existingIdx, md.scale or 1.0)
+					end
+					self:RefreshSlotHPUI(existingIdx)
+					log("[MonsterManager] 미니언 부활 slotIdx=" .. slotIdx)
+				end
+			else
+				-- 신규 소환
+				if self._T.monsters == nil then self._T.monsters = {} end
+				local hp  = math.floor(hpBase  * md.hpMult)
+				local atk = math.floor(atkBase * md.atkMult)
+				local def = math.floor(defBase * md.defMult)
+				local newMon = {
+					hp           = hp,   maxHp = hp,
+					atk          = atk,  def   = def,
+					alive        = true, newlySpawned = true,
+					name         = md.name,
+					monsterId    = md.monsterId,
+					spriteRUID   = md.spriteRUID   or "",
+					attackRUID   = md.attackRUID   or "",
+					attackEffect = md.attackEffect or "",
+					attackSound  = md.attackSound  or "",
+					hitRUID      = md.hitRUID      or "",
+					dieRUID      = md.dieRUID      or "",
+					attackTarget = md.attackTarget or "all",
+					slotIdx      = slotIdx,
+				}
+				local newIndex = #self._T.monsters + 1
+				self._T.monsters[newIndex] = newMon
+				local slot = allSlots[slotIdx]
+				if isvalid(slot) then
+					slot.Enable = true
+					self:ApplySpriteToSlot(newIndex, md.spriteRUID)
+					self:ApplyScaleToSlot(newIndex, md.scale or 1.0)
+					self:RefreshSlotHPUI(newIndex)
+					local nameEnt = slot:GetChildByName("txtMonsterName", true)
+					if isvalid(nameEnt) then
+						nameEnt.TextGUIRendererComponent.Text = md.name
+					end
+				end
+				log("[MonsterManager] 미니언 신규 소환 monsterId=" .. monsterId .. " slotIdx=" .. slotIdx .. " index=" .. newIndex)
+			end
+			processed += 1
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ClearNewlySpawned()
+		if self._T.monsters == nil then return end
+		for _, m in ipairs(self._T.monsters) do
+			m.newlySpawned = false
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method Entity GetSlotForMonsterId(string monsterId)
+		if self._T.monsters == nil then return nil end
+		for i, m in ipairs(self._T.monsters) do
+			if m.monsterId == monsterId then
+				return self:GetSlotForMonster(i)
+			end
+		end
+		return nil
+	end
+
+	@ExecSpace("ClientOnly")
+	method Entity GetSlotForMonster(integer monsterIndex)
+		local m = self._T.monsters[monsterIndex]
+		if m == nil then return nil end
+		local allSlots = self:GetSlots()
+		local idx = m.slotIdx or monsterIndex
+		return allSlots[idx]
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RestoreAllIdleSprites()
+		-- 살아있는 몬스터 전부를 idle 스프라이트로 되돌린다.
+		-- 공격 애니 종료 콜백이 하던 일과 같은 내용이며, **공격할 몬스터가 하나도 없는 턴**
+		-- (전부 스킬을 썼거나 갓 소환됐을 때)에도 같은 복원이 돌도록 따로 뽑았다.
+		-- 죽은 몬스터는 사망 연출이 최종 상태이므로 건드리지 않는다.
+		if self._T.monsters == nil then return end
+		for i, m in ipairs(self._T.monsters) do
+			if m.alive then
+				self:ApplySpriteToSlot(i, m.spriteRUID)
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplySpriteToSlot(integer index, string spriteRUID)
+		if spriteRUID == nil or spriteRUID == "" then return end
+		local slot = self:GetSlotForMonster(index)
+		if not isvalid(slot) then return end
+		
+		local target = slot:GetChildByName("MonsterSprite", true)
+		if not isvalid(target) then target = slot end
+		
+		local renderer = target.SpriteGUIRendererComponent
+		if renderer ~= nil then
+			renderer.ImageRUID = spriteRUID
+			renderer.Color = Color(1, 1, 1, 1)
+			-- ⚠️ **반드시 Loop로 되돌린다.** 사망(L455)·공격(L485) 연출이 `Onetime`으로 바꿔놓기 때문에,
+			--    같은 슬롯을 다음 층에서 재사용하면 새 몬스터의 idle이 **1회만 재생되고 멈춘다.**
+			--    이 메서드는 idle 스프라이트 전용이므로(호출처 3곳 모두 `md.spriteRUID`) 항상 Loop가 맞다.
+			renderer.AnimClipPlayType = SpriteAnimClipPlayType.Loop
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyScaleToSlot(integer index, number scale)
+		local slot = self:GetSlotForMonster(index)
+		if not isvalid(slot) then return end
+		local target = slot:GetChildByName("MonsterSprite", true)
+		if not isvalid(target) then target = slot end
+		local tf = target.SpriteGUIRendererComponent
+		if tf ~= nil then
+			tf.LocalScale = Vector2(scale, scale)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshSlotHPUI(integer index)
+		local m = self._T.monsters[index]
+		if m == nil then return end
+		local slot = self:GetSlotForMonster(index)
+		if not isvalid(slot) then return end
+		
+		local ratio = m.maxHp > 0 and (m.hp / m.maxHp) or 0
+		
+		local hpBar = slot:GetChildByName("HpBar", true)
+		if isvalid(hpBar) then
+			local slider = hpBar.SliderComponent
+			if slider ~= nil then
+				slider.Value = ratio
+				slider.FillRectColor = Color(0.85, 0.15, 0.15, 1)
+				slider.FillRectImageRUID = "cec4bf6a03860ae4e9882ac5a89cf721"
+			end
+		end
+		
+		local hpText = slot:GetChildByName("HpText", true)
+		if isvalid(hpText) then
+			hpText.TextGUIRendererComponent.Text = m.hp .. "/" .. m.maxHp
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayHitEffect(integer index)
+		local m = self._T.monsters[index]
+		if m == nil then return end
+		local slot = self:GetSlotForMonster(index)
+		if not isvalid(slot) then return end
+		
+		if (m.hitRUID or "") ~= "" then
+			local target = slot:GetChildByName("MonsterSprite", true)
+			if not isvalid(target) then target = slot end
+			local renderer = target.SpriteGUIRendererComponent
+			if renderer ~= nil then
+				renderer.ImageRUID = m.hitRUID
+				local capturedRenderer = renderer
+				local capturedRUID = m.spriteRUID
+				local capturedIndex = index
+				_TimerService:SetTimerOnce(function()
+					local mon = self._T.monsters[capturedIndex]
+					if isvalid(capturedRenderer) and mon ~= nil and mon.alive then
+						capturedRenderer.ImageRUID = capturedRUID
+					end
+				end, 0.3)
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayDieAnim(integer index, Entity slot)
+		local m = self._T.monsters[index]
+		if m == nil or not isvalid(slot) then
+			if isvalid(slot) then slot.Enable = false end
+			return
+		end
+		if (m.dieRUID or "") == "" then
+			slot.Enable = false
+			return
+		end
+		local target = slot:GetChildByName("MonsterSprite", true)
+		if not isvalid(target) then
+			target = slot
+		end
+		local renderer = target.SpriteGUIRendererComponent
+		if renderer == nil then
+			slot.Enable = false
+			return
+		end
+		renderer.ImageRUID = m.dieRUID
+		renderer.AnimClipPlayType = SpriteAnimClipPlayType.Onetime
+		local capturedSlot = slot
+		local capturedGen  = self._T.battleGen
+		if self._T.dieHandlers == nil then self._T.dieHandlers = {} end
+		self._T.dieHandlers[index] = target:ConnectEvent(SpriteGUIAnimPlayerEndEvent, function(event)
+			target:DisconnectEvent(SpriteGUIAnimPlayerEndEvent, self._T.dieHandlers[index])
+			self._T.dieHandlers[index] = nil
+			if self._T.battleGen ~= capturedGen then return end
+			if isvalid(capturedSlot) then capturedSlot.Enable = false end
+		end)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayAttackAnimFiltered(table skipMids, any onComplete)
+		if self._T.monsters == nil then
+			if onComplete ~= nil then onComplete() end
+			return
+		end
+		local targets = {}
+		local soundPlayed = false
+		for i, m in ipairs(self._T.monsters) do
+			if m.alive and (m.attackRUID or "") ~= "" and not skipMids[m.monsterId] and not (m.newlySpawned == true) then
+				local slot = self:GetSlotForMonster(i)
+				if isvalid(slot) then
+					local sprTarget = slot:GetChildByName("MonsterSprite", true)
+					if not isvalid(sprTarget) then sprTarget = slot end
+					local renderer = sprTarget.SpriteGUIRendererComponent
+					if renderer ~= nil then
+						renderer.ImageRUID = m.attackRUID
+						renderer.AnimClipPlayType = SpriteAnimClipPlayType.Onetime
+						table.insert(targets, sprTarget)
+						if not soundPlayed and (m.attackSound or "") ~= "" then
+							_SoundService:PlaySound(m.attackSound, 1.0)
+							soundPlayed = true
+						end
+					end
+				end
+			end
+		end
+		if #targets == 0 then
+			-- 이번 턴에 기본 공격을 할 몬스터가 없다(전부 스킬을 썼거나 갓 소환됨).
+			-- 그래도 **스킬 연출로 갈아끼운 스프라이트는 되돌려야 한다** — 아래 애니 종료 콜백의
+			-- 복원 루프가 이 경로에서는 돌지 않기 때문이다. 단독 보스가 스킬을 쓴 턴이 정확히 이 경우.
+			-- 스킬 연출은 호출부가 `wait`으로 끝까지 기다린 뒤라 여기서 되돌려도 잘리지 않는다.
+			self:RestoreAllIdleSprites()
+			if onComplete ~= nil then onComplete() end
+			return
+		end
+		self._T.filteredAtkTarget = targets[1]
+		self._T.filteredAtkEvtHandler = nil
+		local capturedAtkGen = self._T.battleGen
+		self._T.filteredAtkEvtHandler = self._T.filteredAtkTarget:ConnectEvent(SpriteGUIAnimPlayerEndEvent, function(event)
+			self._T.filteredAtkTarget:DisconnectEvent(SpriteGUIAnimPlayerEndEvent, self._T.filteredAtkEvtHandler)
+			self._T.filteredAtkEvtHandler = nil
+			if self._T.battleGen ~= capturedAtkGen then return end
+			-- 공격 애니 완료 후 IDLE 복원.
+			-- 공격한 몬스터만이 아니라 **살아있는 전부**를 되돌린다 — 스킬을 쓴 몬스터도
+			-- 스프라이트가 바뀌어 있는데 그쪽은 공격 애니를 타지 않기 때문이다.
+			self:RestoreAllIdleSprites()
+			if onComplete ~= nil then onComplete() end
+		end)
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer HealMonsterAt(integer index, number ratio)
+		-- (적 스킬 heal_self 전용 진입점)
+		-- 슬롯 `index`의 몬스터가 **자기 최대 체력의 `ratio` 비율**만큼 회복한다(적 스킬 `heal_self`용).
+		-- 최대치를 넘지 않고, 죽은 몬스터는 되살리지 않는다(부활은 `SummonMinions` 담당).
+		--
+		-- ⚠️ **`monsterId`가 아니라 슬롯 인덱스로 받는 이유**: 적 스킬은 **몬스터 개체마다 한 번씩** 발동한다.
+		--    id로 찾아 "같은 id 전부 회복"하게 두면 같은 종이 2마리일 때 **각자 2번씩 회복**해 배로 붙는다
+		--    (실제로 veritate 2마리에서 479 → 957로 +239가 두 번 들어갔다).
+		--    시전자 본인만 회복해야 개체 수와 무관하게 1회씩 적용된다.
+		-- 반환값은 실제 회복량(0이면 이미 만피이거나 대상이 없다).
+		if self._T.monsters == nil then return 0 end
+		local m = self._T.monsters[index]
+		if m == nil or not m.alive or m.hp >= m.maxHp then return 0 end
+
+		local amount = math.floor(m.maxHp * ratio)
+		if amount <= 0 then return 0 end
+		local before = m.hp
+		m.hp = math.min(m.maxHp, m.hp + amount)
+		self:RefreshSlotHPUI(index)
+		local healed = m.hp - before
+		log("[MonsterManager] " .. tostring(m.monsterId) .. "(슬롯 " .. tostring(index) ..
+			") 자가 회복 +" .. tostring(healed) .. " → " .. tostring(m.hp) .. "/" .. tostring(m.maxHp))
+		return healed
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyDamageSingle(integer damage)
+		if self._T.monsters == nil then return end
+		for i, m in ipairs(self._T.monsters) do
+			if m.alive then
+				m.hp = math.max(0, m.hp - damage)
+				self:RefreshSlotHPUI(i)
+				self:PlayHitEffect(i)
+				if m.hp <= 0 then
+					m.alive = false
+					self:PlayDieAnim(i, self:GetSlotForMonster(i))
+				end
+				return
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyDamageBack(integer damage)
+		-- 살아있는 몬스터 중 가장 뒤 (인덱스 최대) 에게 데미지
+		if self._T.monsters == nil then return end
+		for i = #self._T.monsters, 1, -1 do
+			local m = self._T.monsters[i]
+			if m.alive then
+				m.hp = math.max(0, m.hp - damage)
+				self:RefreshSlotHPUI(i)
+				self:PlayHitEffect(i)
+				if m.hp <= 0 then
+					m.alive = false
+					self:PlayDieAnim(i, self:GetSlotForMonster(i))
+				end
+				return
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyDamageAll(integer damage)
+		if self._T.monsters == nil then return end
+		for i, m in ipairs(self._T.monsters) do
+			if m.alive then
+				m.hp = math.max(0, m.hp - damage)
+				self:RefreshSlotHPUI(i)
+				self:PlayHitEffect(i)
+				if m.hp <= 0 then
+					m.alive = false
+					self:PlayDieAnim(i, self:GetSlotForMonster(i))
+				end
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsAllDead()
+		if self._T.monsters == nil then return true end
+		for _, m in ipairs(self._T.monsters) do
+			if m.alive then return false end
+		end
+		return true
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer GetAliveCount()
+		if self._T.monsters == nil then return 0 end
+		local count = 0
+		for _, m in ipairs(self._T.monsters) do
+			if m.alive then count += 1 end
+		end
+		return count
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsBossFloor()
+		-- 이 층이 스테이지 보스층(`StageSet.Type = Boss`)인가. `Init`이 세운다.
+		return self._T.isBossFloor == true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateBossFloorTurnText(integer used, integer limit)
+		-- 스테이지 보스층의 남은 턴 표시(2026-09-07 신설). 시즌보스의 `BossOverlay/TurnText`와
+		-- 별개다 — 그쪽 오버레이는 스테이지 전투에서 꺼져 있다.
+		-- ⚠️ 제한만 걸고 표시가 없으면 패배가 예고 없이 닥친다.
+		if not isvalid(self.BossSlotPanel) then return end
+		local t = self.BossSlotPanel:GetChildByName("TurnText", true)
+		if not isvalid(t) then return end
+		if limit <= 0 then t.Enable = false return end
+		t.Enable = true
+		local c = t.TextGUIRendererComponent
+		if c == nil then c = t.TextComponent end
+		if c ~= nil then
+			c.Text = "남은 턴 " .. tostring(math.max(0, limit - used)) .. "/" .. tostring(limit)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer GetDefense()
+		if self._T.monsters == nil then return 0 end
+		for _, m in ipairs(self._T.monsters) do
+			if m.alive then return m.def end
+		end
+		return 0
+	end
+
+	@ExecSpace("ClientOnly")
+	method table GetAliveSlots()
+		-- 살아있는 몬스터의 슬롯 엔티티 리스트 반환
+		if self._T.monsters == nil then return {} end
+		local result = {}
+		for i, m in ipairs(self._T.monsters) do
+			if m.alive then
+				local slot = self:GetSlotForMonster(i)
+				if isvalid(slot) then
+					table.insert(result, slot)
+				end
+			end
+		end
+		return result
+	end
+
+	@ExecSpace("ClientOnly")
+	method table GetAllMonsterAttacks()
+		local result = {}
+		if self._T.monsters == nil then return result end
+		for i, m in ipairs(self._T.monsters) do
+			if m.alive then
+				table.insert(result, {
+					monsterIndex = i,
+					monsterId    = m.monsterId    or "",
+					atk          = m.atk          or 0,
+					attackTarget = m.attackTarget  or "all",
+					attackEffect = m.attackEffect  or "",
+					attackSound  = m.attackSound   or "",
+				})
+			end
+		end
+		return result
+	end
+
+	@ExecSpace("ClientOnly")
+	method Entity GetTargetSlot(string targetType)
+		-- 데미지 적용 전 호출용: alive 몬스터의 front/back 슬롯 반환
+		if self._T.monsters == nil then return nil end
+		if targetType == "back" then
+			for i = #self._T.monsters, 1, -1 do
+				if self._T.monsters[i].alive then
+					return self:GetSlotForMonster(i)
+				end
+			end
+		else
+			for i, m in ipairs(self._T.monsters) do
+				if m.alive then return self:GetSlotForMonster(i) end
+			end
+		end
+		return nil
+	end
+
+	@ExecSpace("ClientOnly")
+	method table GetFrontNSlots(integer count)
+		-- 데미지 적용 전 전방 N개 생존 슬롯 반환 (히트 이펙트 타겟 지정용)
+		if self._T.monsters == nil then return {} end
+		local result = {}
+		for i, m in ipairs(self._T.monsters) do
+			if m.alive then
+				local slot = self:GetSlotForMonster(i)
+				if isvalid(slot) then
+					table.insert(result, slot)
+					if #result >= count then break end
+				end
+			end
+		end
+		return result
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyDamageFrontN(integer damage, integer count)
+		-- 전방 N개 생존 몬스터에게 순서대로 데미지
+		if self._T.monsters == nil then return end
+		local hit = 0
+		for i, m in ipairs(self._T.monsters) do
+			if m.alive then
+				m.hp = math.max(0, m.hp - damage)
+				self:RefreshSlotHPUI(i)
+				self:PlayHitEffect(i)
+				if m.hp <= 0 then
+					m.alive = false
+					self:PlayDieAnim(i, self:GetSlotForMonster(i))
+				end
+				hit += 1
+				if hit >= count then break end
+			end
+		end
+	end
+
+end

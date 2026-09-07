@@ -1,0 +1,33 @@
+{
+  "Id": "",
+  "GameId": "",
+  "EntryKey": "codeblock://b596f28c-0c9e-4c08-9a85-4f2c1c02b6ee",
+  "ContentType": "x-mod/codeblock",
+  "Content": "",
+  "Usage": 0,
+  "UsePublish": 1,
+  "UseService": 0,
+  "CoreVersion": "26.7.0.0",
+  "StudioVersion": "",
+  "DynamicLoading": 0,
+  "ContentProto": {
+    "Use": "Json",
+    "Json": {
+      "CoreVersion": {
+        "Major": 0,
+        "Minor": 2
+      },
+      "ScriptVersion": {
+        "Major": 1,
+        "Minor": 1
+      },
+      "Description": "",
+      "Id": "b596f28c-0c9e-4c08-9a85-4f2c1c02b6ee",
+      "Language": 1,
+      "Name": "UIGachaPull1",
+      "Type": 1,
+      "Source": 0,
+      "Target": null
+    }
+  }
+}

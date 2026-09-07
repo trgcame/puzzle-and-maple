@@ -1,0 +1,17 @@
+@Component
+script UIGachaPull1 extends Component
+
+	@EventSender("Self")
+	handler HandleButtonClickEvent(ButtonClickEvent event)
+		--------------- Native Event Sender Info ----------------
+		-- Sender: ButtonComponent
+		-- Space: Client
+		---------------------------------------------------------
+		-- 1회 소환. 티켓 검사·차감·추첨은 전부 서버(HeroDataManager:DoGachaPull)가 한다.
+		-- 팝업이 떠 있거나 이전 응답 대기 중이면 요청하지 않는다(연타 방지).
+		if not _GachaResultUI:TryBeginPull() then return end
+		log("[UIGachaPull1] 1회 소환 요청")
+		_HeroDataManager:RequestGachaPull(1)
+	end
+
+end

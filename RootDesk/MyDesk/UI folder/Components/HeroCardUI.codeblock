@@ -1,0 +1,33 @@
+{
+  "Id": "",
+  "GameId": "",
+  "EntryKey": "codeblock://0cd5a8b7-113b-4cb3-8d0e-41e6e6cf1650",
+  "ContentType": "x-mod/codeblock",
+  "Content": "",
+  "Usage": 0,
+  "UsePublish": 1,
+  "UseService": 0,
+  "CoreVersion": "26.7.0.0",
+  "StudioVersion": "0.1.0.0",
+  "DynamicLoading": 0,
+  "ContentProto": {
+    "Use": "Json",
+    "Json": {
+      "CoreVersion": {
+        "Major": 0,
+        "Minor": 2
+      },
+      "ScriptVersion": {
+        "Major": 1,
+        "Minor": 1
+      },
+      "Description": "",
+      "Id": "0cd5a8b7-113b-4cb3-8d0e-41e6e6cf1650",
+      "Language": 1,
+      "Name": "HeroCardUI",
+      "Type": 1,
+      "Source": 0,
+      "Target": null
+    }
+  }
+}

@@ -1,0 +1,134 @@
+@Component
+script UIBox extends Component
+
+	property CurrencyManager CurrencyManager = "2eb2fe06-342b-43dd-bcd0-feb6eae3550c"
+
+	property TextGUIRendererComponent txtPendingGold = "dd610f86-955b-4a61-9a82-2dc2fc6c0b46"
+
+	property TextGUIRendererComponent txtPendingStone = "3dc959a7-0e89-4ced-9e28-d565a0b02230"
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- reward 패널 캐싱. ⚠️ `reward`는 이 엔티티의 **직계 자식**이어야 한다
+		--    (`GetChildByName`의 2번째 인자가 false = 재귀 안 함).
+		self._T.rewardPanel  = self.Entity:GetChildByName("reward", false)
+		self._T.updateAccum  = 0
+		-- 수령 요청을 보낸 뒤 응답을 기다리는 중인지. nil이면 대기 중이 아니다.
+		self._T.awaitingSeq  = nil
+		-- true면 텍스트에 "대기 중인 양" 대신 **"방금 받은 양"** 을 띄운다.
+		self._T.showClaimed  = false
+		self:_UpdateSprite()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		-- 수령 응답이 오면 1초 주기를 기다리지 않고 **즉시** 표시를 바꾼다.
+		-- 팝업이 5초뿐이라 최대 1초를 흘려보내면 체감이 크다. (테이블 읽기뿐이라 매 프레임이어도 싸다)
+		if self._T.awaitingSeq ~= nil and isvalid(self.CurrencyManager) then
+			if self.CurrencyManager:GetClaimSeq() ~= self._T.awaitingSeq then
+				self._T.awaitingSeq = nil
+				self._T.showClaimed = true
+				self:_UpdateSprite()
+			end
+		end
+
+		-- 1초마다 보상 텍스트·RUID 갱신
+		self._T.updateAccum = (self._T.updateAccum or 0) + delta
+		if self._T.updateAccum >= 1.0 then
+			self._T.updateAccum = 0
+			self:_UpdateSprite()
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		-- 타이머 정리
+		if self._T.hideTimer then _TimerService:ClearTimer(self._T.hideTimer) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _UpdateSprite()
+		-- 받을 수 있는 보상 여부에 따라 ImageRUID 교체 및 텍스트 갱신
+		if not isvalid(self.CurrencyManager) then return end
+
+		-- 상자 스프라이트는 **항상 대기 중인 양** 기준이다(수령하면 빈 상자로 돌아가야 하므로).
+		-- 금액이 0이어도 10분 단위 1개 이상 쌓였으면 수령 가능 상태로 표시한다.
+		-- 단위는 `CurrencyManager`의 프로퍼티를 그대로 쓴다 — 여기에 600을 박아 두면
+		-- 서버가 단위를 바꿨을 때 표시만 조용히 어긋난다.
+		local unitSec    = self.CurrencyManager.IdleUnitSeconds
+		local elapsed    = os.time() - (self.CurrencyManager:GetLastRewardTime())
+		local hasPending = math.floor(elapsed / unitSec) >= 1
+		local ruid = hasPending
+			and "d84397ca47a54af5be2e9059bd6573e4"
+			or  "4035dccf88524d22957fbe5fd28bfb09"
+		local spr = self.Entity.SpriteGUIRendererComponent
+		if isvalid(spr) then
+			spr.ImageRUID = DataRef(ruid)
+		end
+
+		-- 받을 게 없으면 **아예 못 누르게** 한다(빈 상자를 눌러도 아무 일도 안 일어나는 게 더 헷갈린다).
+		-- ⚠️ `ButtonComponent.Interactable`은 **존재하지 않는 필드**다(Unity 습관).
+		--    MSW는 컴포넌트의 `Enable`로 끈다. `Interactable`은 `CanvasGroupComponent` 쪽 속성이다.
+		-- 수령 직후에도 `hasPending`이 false가 되므로 팝업이 떠 있는 동안 자동으로 잠긴다.
+		local btn = self.Entity.ButtonComponent
+		if btn ~= nil then
+			btn.Enable = hasPending
+		end
+
+		-- ⚠️ 텍스트는 상황에 따라 **다른 값**을 띄운다.
+		--    · 평소: 대기 중인 양(GetPending*)
+		--    · 수령 직후 팝업이 떠 있는 동안: **방금 받은 양**(GetLastClaimed*)
+		--    수령하면 대기 중인 양이 0이 되므로, 그대로 두면 축하 팝업이 1초 만에 "0 / 0"이 된다.
+		local gold, stone
+		if self._T.showClaimed == true then
+			gold  = self.CurrencyManager:GetLastClaimedGold()
+			stone = self.CurrencyManager:GetLastClaimedStone()
+		else
+			gold  = self.CurrencyManager:GetPendingGold()
+			stone = self.CurrencyManager:GetPendingStone()
+		end
+		if isvalid(self.txtPendingGold)  then
+			self.txtPendingGold.Text  = tostring(gold)
+		end
+		if isvalid(self.txtPendingStone) then
+			self.txtPendingStone.Text = tostring(stone)
+		end
+	end
+
+	@EventSender("Self")
+	handler HandleButtonClickEvent(ButtonClickEvent event)
+		--------------- Native Event Sender Info ----------------
+		-- Sender: ButtonComponent
+		-- Space: Client
+		---------------------------------------------------------
+		-- Parameters
+		local Entity = event.Entity
+		---------------------------------------------------------
+		-- 방치 보상 수령 요청 후 reward 패널 5초 표시
+		if isvalid(self.CurrencyManager) then
+			-- 지금 카운터를 적어 둔다. 이 값이 바뀌면 **내가 보낸 요청의 결과**가 온 것이다.
+			-- 이렇게 하지 않고 바로 GetLastClaimed*를 띄우면 **직전 수령의 낡은 값**이 잠깐 보인다.
+			self._T.awaitingSeq = self.CurrencyManager:GetClaimSeq()
+			self._T.showClaimed = false
+			self.CurrencyManager:RequestClaimIdleReward()
+		end
+		local panel = self._T.rewardPanel
+		if isvalid(panel) then
+			panel.Enable = true
+			if self._T.hideTimer then
+				_TimerService:ClearTimer(self._T.hideTimer)
+			end
+			self._T.hideTimer = _TimerService:SetTimerOnce(function()
+				if isvalid(panel) then
+					panel.Enable = false
+				end
+				self._T.hideTimer = nil
+				-- 팝업이 닫히면 다시 "대기 중인 양" 표시로 돌아간다.
+				self._T.awaitingSeq = nil
+				self._T.showClaimed = false
+				self:_UpdateSprite()
+			end, 5.0)
+		end
+	end
+
+end

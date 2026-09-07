@@ -1,0 +1,113 @@
+@Component
+script HeroCardUI extends Component
+
+	method void OnBeginPlay()
+		self._T.heroId  = nil
+		self._T.inParty = false
+		
+		local entityName = self.Entity.Name
+		local prefix = "HeroCard_"
+		if string.sub(entityName, 1, #prefix) == prefix then
+			local heroId = string.sub(entityName, #prefix + 1)
+			local data = _HeroInventoryUI:GetCardPendingData(heroId)
+			if data ~= nil then
+				self:SetHeroData(data.heroId, data.starLevel, data.selectRUID, data.inParty)
+			end
+		end
+	end
+
+	method void OnUpdate(number delta)
+		if self._T.heroId == nil then return end
+		
+		self._T.checkTimer = (self._T.checkTimer or 0) + delta
+		if self._T.checkTimer >= 0.2 then
+			self._T.checkTimer = 0
+			local data = _HeroDataManager:GetInventoryData()
+			if data ~= nil then
+				local party = data.party or {}
+				local nowInParty = false
+				for _, pid in ipairs(party) do
+					if pid == self._T.heroId then nowInParty = true; break end
+				end
+				if nowInParty ~= self._T.inParty then
+					self._T.inParty = nowInParty
+					self:UpdateParticle(nowInParty)
+				end
+			end
+		end
+	end
+
+	method void SetHeroData(string heroId, integer starLevel, string selectRUID, boolean inParty)
+		self._T.heroId  = heroId
+		self._T.inParty = inParty
+		self.Entity.Enable = true
+		
+		local spr = self.Entity.SpriteGUIRendererComponent
+		if spr ~= nil and selectRUID ~= nil and selectRUID ~= "" then
+			spr.ImageRUID = selectRUID
+		end
+		
+		self:UpdateAdvanceSprite(heroId, starLevel)
+		self:UpdateParticle(inParty)
+	end
+
+	method void UpdateAdvanceSprite(string heroId, integer starLevel)
+		local advEnt = self.Entity:GetChildByName("Advance", true)
+		if not isvalid(advEnt) then return end
+		local spr = advEnt.SpriteGUIRendererComponent
+		if spr == nil then return end
+		
+		local base = _HeroDataManager:GetHeroBaseData(heroId)
+		if base == nil then return end
+		
+		local classMap = {
+			["전사"] = "warrior", ["마법사"] = "magician",
+			["궁수"] = "archer",  ["도적"]   = "rogue", ["해적"] = "pirate",
+		}
+		local classEng = classMap[base.Class or ""]
+		if classEng == nil then return end
+		
+		local sl = math.max(1, math.min(5, starLevel))
+		local slotId = classEng .. "_" .. tostring(sl)
+		
+		local count = _DataService:GetRowCount("HeroSlotSet")
+		for i = 1, count do
+			if _DataService:GetCell("HeroSlotSet", i, "id") == slotId then
+				spr.ImageRUID = _DataService:GetCell("HeroSlotSet", i, "Advance")
+				break
+			end
+		end
+	end
+
+	method void UpdateParticle(boolean inParty)
+		local particleEnt = self.Entity:GetChildByName("Particle", true)
+		if isvalid(particleEnt) then
+			particleEnt.Enable = inParty
+		end
+	end
+
+	method void SetEmpty()
+		self._T.heroId  = nil
+		self._T.inParty = false
+		self:UpdateParticle(false)
+		self.Entity.Enable = false
+	end
+
+	method void OnCardClicked()
+		if self._T.heroId == nil then return end
+		_HeroInventoryUI:SelectHero(self._T.heroId)
+	end
+
+	@EventSender("Self")
+	handler HandleButtonClickEvent(ButtonClickEvent event)
+		--------------- Native Event Sender Info ----------------
+		-- Sender: ButtonComponent
+		-- Space: Client
+		---------------------------------------------------------
+		-- Parameters
+		-- local Entity = event.Entity
+		---------------------------------------------------------
+		self:OnCardClicked()
+	end
+
+end

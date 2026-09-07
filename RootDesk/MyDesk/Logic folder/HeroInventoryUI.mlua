@@ -1,0 +1,594 @@
+@Logic
+script HeroInventoryUI extends Logic
+
+	property Entity panelInventory = "b08e5f60-f364-44a9-b9d6-fbe41a3ef5dd"
+
+	property CurrencyManager CurrencyManager = "2eb2fe06-342b-43dd-bcd0-feb6eae3550c"
+
+	property Entity partySlot1 = "77a88ccf-b8cc-47d2-89ab-a5a8d29f6f14"
+
+	property Entity partySlot2 = "5279215f-c5a3-4ab3-975b-5c74f6b7b951"
+
+	property Entity partySlot3 = "53c4c3e1-e4b8-4853-91a4-1a9289ec48b5"
+
+	property Entity partySlot4 = "9c144577-0954-4c39-b593-0201d830810c"
+
+	property Entity partySlot5 = "35fa6439-936a-497c-b413-cc0b1c39399b"
+
+	property string heroCardModelId = "model://bc86ca02-1d55-40fc-a078-ec480d4cdd3c"
+
+	property Entity heroGridPanel = "8bb605c2-d53e-4f8b-9912-305449820292"
+
+	property Entity panelDetail = "a14bb7e4-f920-4587-a534-5f9df4adc5a3"
+
+	property TextGUIRendererComponent txtDetailName = "9c70e0ed-8e6b-4b91-9214-6f9f1846b96f"
+
+	property TextGUIRendererComponent txtDetailRarity = "f444dc85-3c03-4fd6-a1cf-9f11c2f2dd88"
+
+	property TextGUIRendererComponent txtDetailElement = "2314534d-53b7-4972-9eed-cfcf20a14d38"
+
+	property SpriteGUIRendererComponent imgDetailPortrait = "f699e49b-f751-4fbe-a5d9-fba45050b90b"
+
+
+
+
+	property Entity btnPartyToggle = "e32cfdfd-700f-471c-ad52-bfb75a6a85cc"
+
+	property TextGUIRendererComponent txtBtnParty = "0a68376d-412c-4e7d-a909-004858d961e2"
+
+
+
+
+
+
+
+
+
+	property Entity btnGacha = ""
+
+	method void OnBeginPlay()
+		self._T.currentFilter  = "all"  -- all / Red / Blue / Green / Heart / Multi / Purple
+		self._T.selectedHeroId = nil
+		self._T.isOpen         = false
+		self._T.spawnedCards    = {}    -- 동적 생성된 카드 엔티티 목록
+		self._T.cardPendingData = {}    -- heroId -> 카드 초기화 데이터
+		
+		if isvalid(self.panelInventory) then
+			self.panelInventory.Enable = false
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Open()
+		if self._T.isOpen then return end
+		self._T.isOpen = true
+		if isvalid(self.panelInventory) then
+			self.panelInventory.Enable = true
+		end
+		-- 서버에 최신 데이터 요청 (응답 오면 RefreshDisplay 자동 호출)
+		_HeroDataManager:RequestInventoryData()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Close()
+		self._T.isOpen = false
+		if isvalid(self.panelInventory) then
+			self.panelInventory.Enable = false
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsOpen()
+		return self._T.isOpen == true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetFilter(string elementType)
+		-- elementType: "all" / "Red" / "Blue" / "Green" / "Heart" / "Multi" / "Purple"
+		self._T.currentFilter = elementType
+		self:UpdateGrid()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshDisplay()
+		self:UpdateGrid()
+		self:UpdatePartyPanel()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateGrid()
+		local data = _HeroDataManager:GetInventoryData()
+		if data == nil then
+			log_warning("[HeroInventoryUI] UpdateGrid: 인벤토리 데이터가 nil입니다.")
+			return
+		end
+		
+		local myHeroes = data.heroes or {}
+		local party    = data.party  or {}
+		
+		-- 기존 동적 카드 모두 제거
+		for _, card in ipairs(self._T.spawnedCards) do
+			if isvalid(card) then
+				card:Destroy()
+			end
+		end
+		self._T.spawnedCards = {}
+		
+		-- 영웅 카드 모델은 Model_HeroSlot (루트 Sprite+Button, 자식 Advance/Particle — HeroCardUI가 이 구성을 전제).
+		-- 모델 ID는 Maker 저장 과정에서 재생성될 수 있으므로 이름으로 조회하고, 실패 시 프로퍼티로 폴백한다.
+		local cardModelId = _EntryService:GetModelIdByName("Model_HeroSlot")
+		if cardModelId == nil or cardModelId == "" then
+			cardModelId = self.heroCardModelId
+		end
+		if cardModelId == nil or cardModelId == "" then
+			log_warning("[HeroInventoryUI] Model_HeroSlot 모델을 찾을 수 없습니다.")
+			return
+		end
+		if not isvalid(self.heroGridPanel) then
+			log_warning("[HeroInventoryUI] heroGridPanel이 유효하지 않습니다. 인스펙터에서 UUID를 입력하세요.")
+			return
+		end
+		
+		local totalHeroes = _DataService:GetRowCount("HeroSet")
+		local spawnCount = 0
+		for i = 1, totalHeroes do
+			local heroId    = _DataService:GetCell("HeroSet", i, "HeroId")
+			local selectRUID = _DataService:GetCell("HeroSet", i, "SelectRUID")
+			local name       = _DataService:GetCell("HeroSet", i, "Name")
+			local rarity     = _DataService:GetCell("HeroSet", i, "Rarity")
+		
+			local owned = myHeroes[heroId] ~= nil
+		
+			-- 미보유 영웅은 표시하지 않음
+			if not owned then continue end
+		
+			local dupes     = tonumber(myHeroes[heroId]) or 0
+			local starLevel = _HeroDataManager:CalcStarLevel(heroId, dupes)
+			local inParty = false
+			for _, pid in ipairs(party) do
+				if pid == heroId then inParty = true; break end
+			end
+		
+			-- 카드 초기화 데이터 미리 저장 (HeroCardUI.OnBeginPlay에서 읽어감)
+			self._T.cardPendingData[heroId] = {
+				heroId     = heroId,
+				starLevel  = starLevel,
+				selectRUID = selectRUID,
+				inParty    = inParty,
+			}
+		
+			-- 카드 동적 생성
+			local card = _SpawnService:SpawnByModelId(
+				cardModelId,
+				"HeroCard_" .. heroId,
+				Vector3(0, 0, 0),
+				self.heroGridPanel
+			)
+			if isvalid(card) then
+				table.insert(self._T.spawnedCards, card)
+				spawnCount += 1
+			else
+				log_warning("[HeroInventoryUI] 카드 스폰 실패: " .. heroId)
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method any GetCardPendingData(string heroId)
+		if self._T.cardPendingData == nil then return nil end
+		return self._T.cardPendingData[heroId]
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshPartyPanel()
+		local data = _HeroDataManager:GetInventoryData()
+		if data == nil then return end
+		-- 파티 슬롯 갱신
+		self:UpdatePartyPanel()
+		-- 디테일 패널 버튼 텍스트 갱신 (파티 추가 ↔ 제외 전환)
+		if self._T.selectedHeroId ~= nil then
+			self:UpdateDetailPanel(self._T.selectedHeroId)
+		end
+		-- 그리드는 재생성하지 않음 (파티 변경 시 불필요)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdatePartyPanel()
+		local data = _HeroDataManager:GetInventoryData()
+		if data == nil then return end
+		local party    = data.party  or {}
+		local myHeroes = data.heroes or {}
+		
+		local classMap = {
+			["전사"] = "warrior",
+			["마법사"] = "magician",
+			["궁수"] = "archer",
+			["도적"] = "rogue",
+			["해적"] = "pirate",
+		}
+		
+		local slots = {
+			self.partySlot1, self.partySlot2, self.partySlot3,
+			self.partySlot4, self.partySlot5,
+		}
+		
+		for i, slotEntity in ipairs(slots) do
+			if not isvalid(slotEntity) then continue end
+			local heroId = party[i]
+		
+			local nameEnt        = slotEntity:GetChildByName("txtName",     true)
+			local advancementEnt = slotEntity:GetChildByName("Advancement", true)
+			local iconEnt        = slotEntity:GetChildByName("imgIcon",     true)
+			local advanceEnt     = slotEntity:GetChildByName("Advance",     true)
+			local emptyEnt       = slotEntity:GetChildByName("Empty",       true)
+			local slotSpr        = slotEntity.SpriteGUIRendererComponent
+		
+			if heroId ~= nil then
+				local heroBase  = _HeroDataManager:GetHeroBaseData(heroId)
+				local dupes     = myHeroes[heroId] ~= nil and (tonumber(myHeroes[heroId]) or 0) or 0
+				-- CalcStarLevel이 이제 최소 ★1을 반환하므로 하한 보정은 불필요해졌다.
+				-- (예전 `if starLevel < 1 then starLevel = 1 end`은 ★0 버그를 카드 표시에서만 가리고 있었다.)
+				local starLevel = _HeroDataManager:CalcStarLevel(heroId, dupes)
+		
+				-- partySlot 배경 이미지 (영웅 있을 때)
+				if slotSpr ~= nil then slotSpr.ImageRUID = "02ee62200aa946bc8c381cd19079c03f" end
+		
+				-- 영웅 자식 표시 / Empty 숨김
+				if isvalid(nameEnt)        then nameEnt.Enable        = true  end
+				if isvalid(advancementEnt) then advancementEnt.Enable = true  end
+				if isvalid(iconEnt)        then iconEnt.Enable        = true  end
+				if isvalid(advanceEnt)     then advanceEnt.Enable     = true  end
+				if isvalid(emptyEnt)       then emptyEnt.Enable       = false end
+		
+				if heroBase then
+					-- txtName
+					if isvalid(nameEnt) then
+						local c = nameEnt.TextGUIRendererComponent
+						if c then c.Text = heroBase.Name end
+					end
+		
+					-- HeroSlotSet 조회
+					local classKey = classMap[heroBase.Class] or ""
+					local slotKey  = classKey .. "_" .. tostring(starLevel)
+					local advancementRUID = ""
+					local advanceRUID     = ""
+					if classKey ~= "" then
+						local totalRows = _DataService:GetRowCount("HeroSlotSet")
+						for r = 1, totalRows do
+							if _DataService:GetCell("HeroSlotSet", r, "id") == slotKey then
+								advancementRUID = _DataService:GetCell("HeroSlotSet", r, "AdvancementRUID") or ""
+								advanceRUID     = _DataService:GetCell("HeroSlotSet", r, "Advance") or ""
+								break
+							end
+						end
+					end
+		
+					-- Advancement 이미지
+					if isvalid(advancementEnt) then
+						local c = advancementEnt.SpriteGUIRendererComponent
+						if c then c.ImageRUID = advancementRUID end
+					end
+		
+					-- imgIcon (ThumnailRUID + LocalPosition 오프셋)
+					if isvalid(iconEnt) then
+						local c = iconEnt.SpriteGUIRendererComponent
+						if c then
+							c.ImageRUID = heroBase.ThumnailRUID or ""
+							c.LocalPosition = Vector2(heroBase.LocalX or 0, heroBase.LocalY or 0)
+							c.Color = Color(1, 1, 1, 1)
+						end
+					end
+		
+					-- Advance 이미지
+					if isvalid(advanceEnt) then
+						local c = advanceEnt.SpriteGUIRendererComponent
+						if c then c.ImageRUID = advanceRUID end
+					end
+				end
+			else
+				-- 빈 슬롯: partySlot 이미지 변경 + 자식 숨김 + Empty 표시
+				if slotSpr ~= nil then slotSpr.ImageRUID = "e52653964685422abf598e5a39442095" end
+				if isvalid(nameEnt)        then nameEnt.Enable        = false end
+				if isvalid(advancementEnt) then advancementEnt.Enable = false end
+				if isvalid(iconEnt)        then iconEnt.Enable        = false end
+				if isvalid(advanceEnt)     then advanceEnt.Enable     = false end
+				if isvalid(emptyEnt)       then emptyEnt.Enable       = true  end
+			end
+			slotEntity.Enable = true
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SelectHero(string heroId)
+		self._T.selectedHeroId = heroId
+		self:UpdateDetailPanel(heroId)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateDetailPanel(string heroId)
+		local data = _HeroDataManager:GetInventoryData()
+		if data == nil then return end
+		
+		local myHeroes  = data.heroes or {}
+		local party     = data.party  or {}
+		local heroBase  = _HeroDataManager:GetHeroBaseData(heroId)
+		if heroBase == nil then return end
+		
+		local owned     = myHeroes[heroId] ~= nil
+		local dupes     = owned and (tonumber(myHeroes[heroId]) or 0) or 0
+		local starLevel = _HeroDataManager:CalcStarLevel(heroId, dupes)
+		
+		local inParty = false
+		for _, pid in ipairs(party) do
+			if pid == heroId then inParty = true; break end
+		end
+		
+		-- 기본 정보
+		if isvalid(self.txtDetailName)    then self.txtDetailName.Text    = heroBase.Name           end
+		if isvalid(self.txtDetailRarity)  then self.txtDetailRarity.Text  = heroBase.Rarity         end
+		
+		-- 초상화
+		if isvalid(self.imgDetailPortrait) then
+			local ruid = heroBase.ThumnailRUID
+			if ruid ~= nil and ruid ~= "" then
+				self.imgDetailPortrait.ImageRUID = ruid
+			end
+			self.imgDetailPortrait.Color = Color(1, 1, 1, 1)
+		end
+		
+		-- 차수별 스킬 패널 (SkillPanel1~5) 갱신
+		if isvalid(self.panelDetail) then
+			local classMap = {
+				["전사"] = "warrior", ["마법사"] = "magician",
+				["궁수"] = "archer",  ["도적"]  = "rogue",
+				["해적"] = "pirate",
+			}
+			local classKey  = classMap[heroBase.Class] or ""
+			local totalRows = _DataService:GetRowCount("HeroSlotSet")
+		
+			for i = 1, 5 do
+				local panel = self.panelDetail:GetChildByName("SkillPanel" .. tostring(i), true)
+				if not isvalid(panel) then continue end
+		
+				local tier  = i - 1  -- StarLevel 0~4
+				local skill = _HeroDataManager:GetHeroSkillData(heroId, tier)
+		
+				local skillNameEnt = panel:GetChildByName("SkillName",   true)
+				local skillIconEnt = panel:GetChildByName("SkillIcon",   true)
+				local descEnt      = panel:GetChildByName("Description", true)
+				local advanceEnt   = panel:GetChildByName("Advance",     true)
+				local lockEnt      = panel:GetChildByName("SkillLock",   true)
+		
+				if skill then
+					if isvalid(skillNameEnt) then
+						local c = skillNameEnt.TextGUIRendererComponent
+						if c then c.Text = "「" .. skill.SkillName .. "」" end
+					end
+					if isvalid(descEnt) then
+						local c = descEnt.TextGUIRendererComponent
+						if c then c.Text = self:BuildSkillDesc(skill) end
+					end
+				end
+		
+				-- SkillLock 표시 토글
+				if isvalid(lockEnt) then
+					lockEnt.Enable = (tier >= starLevel)
+				end
+		
+				-- 잠금 여부에 따라 SkillIcon 분기
+				if isvalid(skillIconEnt) then
+					local c = skillIconEnt.SpriteGUIRendererComponent
+					if c then
+						if tier >= starLevel then
+							c.ImageRUID   = "03e1b582ddab48e387b710a8c7f248e2"
+							c.PlayRate    = 0.5
+							c.LocalScale  = Vector2(2, 2)
+						elseif skill then
+							c.ImageRUID   = skill.IconRUID or ""
+							c.PlayRate    = 1.0
+							c.LocalScale  = Vector2(1, 1)
+						end
+					end
+				end
+		
+				-- Advance: HeroSlotSet에서 해당 차수(i = 1~5) RUID 조회
+				if isvalid(advanceEnt) then
+					local c = advanceEnt.SpriteGUIRendererComponent
+					if c then
+						local advanceRUID = ""
+						if classKey ~= "" then
+							local slotKey = classKey .. "_" .. tostring(i)
+							for r = 1, totalRows do
+								if _DataService:GetCell("HeroSlotSet", r, "id") == slotKey then
+									advanceRUID = _DataService:GetCell("HeroSlotSet", r, "Advance") or ""
+									break
+								end
+							end
+						end
+						c.ImageRUID = advanceRUID
+					end
+				end
+			end
+		end
+		
+		-- 현재 능력치(성급 + 스타포스 반영). `CalcATK`/`CalcHP`가 **최종값**을 돌려주므로
+		-- 예전처럼 스타포스 보정을 따로 더하면 안 된다(2026-09-06 곱연산 개편).
+		local sfLevel = _HeroDataManager:GetStarforceLevelClient(heroId)
+		local curAtk = _HeroDataManager:CalcATK(heroBase.BaseATK, starLevel, sfLevel)
+		local curHp  = _HeroDataManager:CalcHP(heroBase.BaseHP, starLevel, sfLevel)
+		self:_SetDetailText("txtDetailAtk", "공격력 " .. tostring(math.floor(curAtk)))
+		self:_SetDetailText("txtDetailHp",  "체력 " .. tostring(math.floor(curHp)))
+
+		-- 다음 성급까지 남은 장수 게이지 (2026-09-07 사용자 요청)
+		self:_UpdateStarProgress(heroId, owned, dupes, starLevel)
+
+		-- 주/부속성 퍼즐. 무기타입이 곧 퍼즐 원소다(HeroSet.WeaponType / SecondaryWeaponType).
+		self:_SetPuzzleRow("txtPuzzleMainLabel", "imgPuzzleMain", heroBase.WeaponType or "")
+		self:_SetPuzzleRow("txtPuzzleSubLabel",  "imgPuzzleSub",  heroBase.SecondaryWeaponType or "")
+
+		-- 스타포스 게이지 (StarForcePanel > Row1~5 > Star1~5 = 25칸)
+		-- 강화 자체는 전용 패널에서 하고, 여기서는 현재 강화 수치만 보여준다.
+		local sfPanel = self.panelDetail:GetChildByName("StarForcePanel", true)
+		if isvalid(sfPanel) then
+			for rowIdx = 1, 5 do
+				local row = sfPanel:GetChildByName("Row" .. tostring(rowIdx), true)
+				if not isvalid(row) then continue end
+				for starIdx = 1, 5 do
+					local star = row:GetChildByName("Star" .. tostring(starIdx), true)
+					if not isvalid(star) then continue end
+					local c = star.SpriteGUIRendererComponent
+					if c then
+						local totalIdx = (rowIdx - 1) * 5 + starIdx
+						if totalIdx <= sfLevel then
+							if totalIdx <= 10 then
+								c.ImageRUID = "ee7f3cf3855c4bdba860ca34896de206"
+								c.Color = Color(1, 1, 1, 1)
+							elseif totalIdx <= 20 then
+								c.ImageRUID = "1361f8ab8314477e8b26bcbbb64dc2b9"
+								c.Color = Color(1, 1, 1, 1)
+							else
+								c.ImageRUID = "ee7f3cf3855c4bdba860ca34896de206"
+								c.Color = Color(1, 0, 0, 1)
+							end
+						else
+							c.ImageRUID = "8fdb78e502be421ba2ade8cb00864bcc"
+							c.Color = Color(1, 1, 1, 1)
+						end
+					end
+				end
+			end
+		end
+		
+		
+		-- 파티 토글 버튼: 파티 여부에 따라 텍스트만 변경
+		if isvalid(self.btnPartyToggle) then
+			self.btnPartyToggle.Enable = owned
+			if isvalid(self.txtBtnParty) then
+				self.txtBtnParty.Text = inParty and "파티에서 제외" or "파티에 추가"
+			end
+		end
+		
+		if isvalid(self.panelDetail) then
+			self.panelDetail.Enable = true
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _UpdateStarProgress(string heroId, boolean owned, integer dupes, integer starLevel)
+		-- `DetailPanel/StarProgress` = 라벨("★3까지 3장") + 슬라이더 게이지 + 수치("12 / 15").
+		-- 🔴 필요 장수는 **등급마다 다르다** — `GetCopiesForStar`가 `StarLevelSet`을 본다.
+		-- ⚠️ `dupes`는 중복 카운터라 **총 장수는 dupes + 1**이다(미보유는 0장).
+		if not isvalid(self.panelDetail) then return end
+		local sp = self.panelDetail:GetChildByName("StarProgress", true)
+		if not isvalid(sp) then return end
+
+		local labelEnt = sp:GetChildByName("Label", true)
+		local countEnt = sp:GetChildByName("Count", true)
+		local barEnt   = sp:GetChildByName("Bar",   true)
+
+		local total = owned and (dupes + 1) or 0
+		local ratio, labelText, countText
+		if not owned then
+			ratio = 0
+			labelText = "미보유"
+			countText = "-"
+		elseif starLevel >= 5 then
+			ratio = 1
+			labelText = "★5 MAX"
+			countText = tostring(total) .. "장"
+		else
+			local cur  = _HeroDataManager:GetCopiesForStar(heroId, starLevel)
+			local need = _HeroDataManager:GetCopiesForStar(heroId, starLevel + 1)
+			local span = math.max(1, need - cur)
+			ratio = math.max(0, math.min(1, (total - cur) / span))
+			labelText = "★" .. tostring(starLevel + 1) .. "까지 " .. tostring(math.max(0, need - total)) .. "장"
+			countText = tostring(total) .. " / " .. tostring(need)
+		end
+
+		if isvalid(labelEnt) then
+			local c = labelEnt.TextGUIRendererComponent
+			if c ~= nil then c.Text = labelText end
+		end
+		if isvalid(countEnt) then
+			local c = countEnt.TextGUIRendererComponent
+			if c ~= nil then c.Text = countText end
+		end
+		if isvalid(barEnt) then
+			local c = barEnt.SliderComponent
+			if c ~= nil then
+				c.MinValue = 0
+				c.MaxValue = 1
+				c.Value    = ratio
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _SetDetailText(string name, string value)
+		-- 상세 패널 안의 텍스트를 이름으로 찾아 채운다.
+		-- 새로 추가한 엔티티라 프로퍼티(UUID) 배선이 없어 경로 조회를 쓴다.
+		if not isvalid(self.panelDetail) then return end
+		local e = self.panelDetail:GetChildByName(name, true)
+		if not isvalid(e) then return end
+		local c = e.TextGUIRendererComponent
+		if c ~= nil then c.Text = value end
+	end
+
+	@ExecSpace("ClientOnly")
+	method string _PuzzleRUID(string elementType)
+		-- 무기타입(=퍼즐 원소) -> 퍼즐 스프라이트. PuzzleSet은 6행뿐이라 한 번 읽어 캐시한다.
+		if self._T.puzzleRuid == nil then
+			self._T.puzzleRuid = {}
+			local n = _DataService:GetRowCount("PuzzleSet")
+			for i = 1, n do
+				local et = _DataService:GetCell("PuzzleSet", i, "ElementType")
+				self._T.puzzleRuid[et] = _DataService:GetCell("PuzzleSet", i, "SpriteRUID")
+			end
+		end
+		return self._T.puzzleRuid[elementType] or ""
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _SetPuzzleRow(string labelName, string imgName, string elementType)
+		-- 원소가 비어 있으면 라벨과 퍼즐을 함께 숨긴다(부속성이 없는 영웅 대비).
+		local ruid = self:_PuzzleRUID(elementType)
+		local shown = (ruid ~= "")
+		if not isvalid(self.panelDetail) then return end
+		local label = self.panelDetail:GetChildByName(labelName, true)
+		if isvalid(label) then label.Enable = shown end
+		local img = self.panelDetail:GetChildByName(imgName, true)
+		if isvalid(img) then
+			img.Enable = shown
+			local c = img.SpriteGUIRendererComponent
+			if c ~= nil and shown then c.ImageRUID = ruid end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnClickPartyToggle()
+		local heroId = self._T.selectedHeroId
+		if heroId == nil then return end
+		local data = _HeroDataManager:GetInventoryData()
+		if data == nil then return end
+		local party = data.party or {}
+		local inParty = false
+		for _, pid in ipairs(party) do
+			if pid == heroId then inParty = true; break end
+		end
+		if inParty then
+			_HeroDataManager:RequestRemoveFromParty(heroId)
+		else
+			_HeroDataManager:RequestAddToParty(heroId)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method string BuildSkillDesc(any skill)
+		if skill.SkillDescription ~= nil and skill.SkillDescription ~= "" then
+			return skill.SkillDescription
+		end
+		return "(설명 없음)"
+	end
+
+end
+

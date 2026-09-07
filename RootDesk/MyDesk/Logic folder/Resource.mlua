@@ -1,0 +1,38 @@
+@Logic
+script Resource extends Logic
+
+	-- ⚠️ 아래 3개는 **animationclip RUID 전용**이다.
+	--    sprite RUID를 넘기면 `LoadAnimationClipAndWait`가 **호출 지점에서 `[LEA-3023] TypeMismatch`를
+	--    찍고 nil을 돌려준다.** 그래서 nil 가드로는 LEA-3023을 못 막는다 — 애초에 sprite를 넘기지 말 것.
+	--    (리소스팩에 따라 타격 이펙트가 단일 클립이 아니라 `attack1/info/hit/0 /1 …` 낱장 sprite로
+	--     쪼개져 있다. `MonsterSet.AttackEffect` 같은 칸에 그걸 넣으면 여기까지 흘러온다.)
+	--    가드를 두는 이유는 뒤따르던 `[LEA-2007]`과 **호출부의 duration 파손**을 막기 위해서다.
+	--    duration이 깨지면 `Effect:PlayEffect`의 자동 Destroy 타이머가 어긋나 이펙트 엔티티가 샌다.
+	@ExecSpace("ClientOnly")
+	method number GetTotalDelay(string animation)
+		-- 애니메이션의 전체 재생 시간을 계산하여 반환
+		local animationClip = _ResourceService:LoadAnimationClipAndWait(animation)
+		if animationClip == nil then return 0 end
+		local totalDelay = 0
+		for _, frame in ipairs(animationClip.Frames) do
+			totalDelay += frame.Delay
+		end
+
+		return totalDelay
+	end
+
+	method number GetStartFrameDelay(string animation)
+		-- 애니메이션 첫 번째 프레임의 지연 시간을 반환
+		local animationClip = _ResourceService:LoadAnimationClipAndWait(animation)
+		if animationClip == nil or #animationClip.Frames == 0 then return 0 end
+		return animationClip.Frames[1].Delay
+	end
+
+	method number GetEndFrameDelay(string animation)
+		-- 애니메이션 마지막 프레임의 지연 시간을 반환
+		local animationClip = _ResourceService:LoadAnimationClipAndWait(animation)
+		if animationClip == nil or #animationClip.Frames == 0 then return 0 end
+		return animationClip.Frames[#animationClip.Frames].Delay
+	end
+
+end

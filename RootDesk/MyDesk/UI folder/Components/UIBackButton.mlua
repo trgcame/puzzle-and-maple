@@ -1,0 +1,18 @@
+@Component
+script UIBackButton extends Component
+
+	@EventSender("Self")
+	handler HandleButtonClickEvent(ButtonClickEvent event)
+		--------------- Native Event Sender Info ----------------
+		-- Sender: ButtonComponent
+		-- Space: Client
+		---------------------------------------------------------
+		-- Parameters
+		local Entity = event.Entity
+		---------------------------------------------------------
+		local uiManager = _EntityService:GetEntityByPath("/common/Manager/UIManager")
+		uiManager.UIManager:GoBack()
+		
+	end
+
+end

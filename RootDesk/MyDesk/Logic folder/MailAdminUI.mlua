@@ -1,0 +1,127 @@
+@Logic
+script MailAdminUI extends Logic
+
+	-- 운영자 전용 우편 발송 화면 (라이브 운영용).
+	--
+	-- 진입점은 **일반 유저와 같은 로비 `우편함` 버튼**이다 — `UIMail` 글루가
+	-- `_MailManager:IsAdmin()`으로 갈라서 운영자면 이 화면, 아니면 우편함을 연다.
+	-- 그래서 일반 유저에게는 이 화면의 존재 자체가 드러나지 않는다.
+	--
+	-- 🔴 이 화면이 열린다는 것이 곧 권한은 아니다. **발송 권한은 서버가 판정한다**
+	--    (`MailManager:RequestGMSend`가 `senderUserId`를 다시 검사). 여기 클라 판정은
+	--    "어느 화면을 띄울까"를 고르는 용도일 뿐이다.
+
+	property Entity panel = "fead055f-1809-4eaa-88c2-be21e8bd0d14"
+
+	method void OnBeginPlay()
+		self._T.targetAll = true
+		if isvalid(self.panel) then self.panel.Enable = false end
+		log("[MailAdminUI] 초기화 완료")
+	end
+
+	@ExecSpace("ClientOnly")
+	method Entity _Find(string path)
+		-- 경로는 루트(`/ui/MailAdmin`) 기준. `GetChildByName`은 경로를 못 받으므로 한 단계씩 내려간다.
+		if not isvalid(self.panel) then return nil end
+		local cur = self.panel
+		for seg in string.gmatch(path, "[^/]+") do
+			if not isvalid(cur) then return nil end
+			cur = cur:GetChildByName(seg, false)
+		end
+		return cur
+	end
+
+	@ExecSpace("ClientOnly")
+	method string _GetInput(string name)
+		local ent = self:_Find("BackGround/Window/" .. name)
+		if not isvalid(ent) then return "" end
+		local c = ent.TextGUIRendererInputComponent
+		if c == nil then
+			log_warning("[MailAdminUI] 입력 컴포넌트 없음: " .. tostring(name))
+			return ""
+		end
+		return c.Text or ""
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _SetText(Entity ent, string value)
+		if not isvalid(ent) then return end
+		local t = ent.TextGUIRendererComponent
+		if t ~= nil then t.Text = value return end
+		local t2 = ent.TextComponent
+		if t2 ~= nil then t2.Text = value return end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Open()
+		if not isvalid(self.panel) then
+			log_warning("[MailAdminUI] panel이 비어 있다 — .ui 재빌드 후 bind 확인")
+			return
+		end
+		self.panel.Enable = true
+		self:_RefreshTargetLabel()
+		self:ShowResult(true, "")
+		log("[MailAdminUI] 발송 화면 열림")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Close()
+		if isvalid(self.panel) then self.panel.Enable = false end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ToggleTarget()
+		self._T.targetAll = not (self._T.targetAll == true)
+		self:_RefreshTargetLabel()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _RefreshTargetLabel()
+		local btn = self:_Find("BackGround/Window/TargetBtn")
+		self:_SetText(btn, (self._T.targetAll == true) and "대상: 전체" or "대상: 특정 유저")
+		-- 전체 발송일 때는 userId 칸을 비활성화해 헷갈리지 않게 한다.
+		local uid = self:_Find("BackGround/Window/UserIdInput")
+		if isvalid(uid) then uid.Enable = not (self._T.targetAll == true) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowResult(boolean ok, string message)
+		local t = self:_Find("BackGround/Window/ResultText")
+		self:_SetText(t, message or "")
+		if isvalid(t) then
+			local r = t.TextGUIRendererComponent
+			if r ~= nil then
+				r.FontColor = ok and Color(0.6, 1.0, 0.7, 1.0) or Color(1.0, 0.55, 0.55, 1.0)
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnClickSend()
+		local title = self:_GetInput("TitleInput")
+		if title == "" then
+			self:ShowResult(false, "제목을 입력하세요.")
+			return
+		end
+		local target = (self._T.targetAll == true) and "all" or "user"
+		_MailManager:RequestGMSend(
+			target,
+			self:_GetInput("UserIdInput"),
+			title,
+			self:_GetInput("BodyInput"),
+			math.floor(tonumber(self:_GetInput("GoldInput"))   or 0),
+			math.floor(tonumber(self:_GetInput("StoneInput"))  or 0),
+			math.floor(tonumber(self:_GetInput("TicketInput")) or 0),
+			self:_GetInput("HeroInput"),
+			math.floor(tonumber(self:_GetInput("DaysInput"))   or 0)
+		)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OpenInbox()
+		-- 운영자도 자기 우편함은 봐야 한다. 발송 화면을 닫고 일반 우편함을 연다.
+		self:Close()
+		if isvalid(_MailUI) then _MailUI:Open() end
+	end
+
+end

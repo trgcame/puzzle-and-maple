@@ -1,0 +1,352 @@
+{
+  "Id": "",
+  "GameId": "",
+  "EntryKey": "gamelogic://fc99954dc24c4cd9941b0f5ca9b443bd",
+  "ContentType": "x-mod/gamelogic",
+  "Content": "",
+  "Usage": 0,
+  "UsePublish": 1,
+  "UseService": 0,
+  "CoreVersion": "26.7.0.0",
+  "StudioVersion": "0.1.0.0",
+  "DynamicLoading": 0,
+  "ContentProto": {
+    "Use": "Binary",
+    "Entities": [
+      {
+        "id": "c4cdb0a8-40fc-443f-8c58-e5c5ba76bc3d",
+        "path": "/common",
+        "componentNames": "",
+        "jsonString": {
+          "name": "common",
+          "path": "/common",
+          "nameEditable": false,
+          "enable": true,
+          "visible": true,
+          "localize": false,
+          "displayOrder": 0,
+          "pathConstraints": "/",
+          "revision": 1,
+          "modelId": null,
+          "@components": [],
+          "@version": 1
+        }
+      },
+      {
+        "id": "e825f4df-46bc-4418-9501-e9800d411678",
+        "path": "/common/Manager",
+        "componentNames": "",
+        "jsonString": {
+          "name": "Manager",
+          "path": "/common/Manager",
+          "nameEditable": true,
+          "enable": true,
+          "visible": true,
+          "localize": false,
+          "displayOrder": 0,
+          "pathConstraints": "//",
+          "revision": 1,
+          "modelId": null,
+          "@components": [],
+          "@version": 1
+        }
+      },
+      {
+        "id": "c8f5b5e2-cc2a-470e-a065-b1ef66384101",
+        "path": "/common/Manager/UIManager",
+        "componentNames": "script.UIManager",
+        "jsonString": {
+          "name": "UIManager",
+          "path": "/common/Manager/UIManager",
+          "nameEditable": true,
+          "enable": true,
+          "visible": true,
+          "localize": false,
+          "displayOrder": 0,
+          "pathConstraints": "///",
+          "revision": 1,
+          "modelId": null,
+          "@components": [
+            {
+              "@type": "script.UIManager",
+              "Enable": true
+            }
+          ],
+          "@version": 1
+        }
+      },
+      {
+        "id": "19ce6a28-58bd-4542-92b8-c265bc6eda48",
+        "path": "/common/Manager/BattleManager",
+        "componentNames": "script.BattleManager",
+        "jsonString": {
+          "name": "BattleManager",
+          "path": "/common/Manager/BattleManager",
+          "nameEditable": true,
+          "enable": true,
+          "visible": true,
+          "localize": false,
+          "displayOrder": 1,
+          "pathConstraints": "///",
+          "revision": 1,
+          "modelId": null,
+          "@components": [
+            {
+              "@type": "script.BattleManager",
+              "Enable": true
+            }
+          ],
+          "@version": 1
+        }
+      },
+      {
+        "id": "43e421d6-5bf3-4ec4-bb64-562f3c811a45",
+        "path": "/common/Manager/TurnManager",
+        "componentNames": "script.TurnManager",
+        "jsonString": {
+          "name": "TurnManager",
+          "path": "/common/Manager/TurnManager",
+          "nameEditable": true,
+          "enable": true,
+          "visible": true,
+          "localize": false,
+          "displayOrder": 2,
+          "pathConstraints": "///",
+          "revision": 1,
+          "modelId": null,
+          "@components": [
+            {
+              "@type": "script.TurnManager",
+              "Enable": true
+            }
+          ],
+          "@version": 1
+        }
+      },
+      {
+        "id": "e6134141-3e3a-4af2-afd3-5ff8ee51c719",
+        "path": "/common/Manager/MonsterManager",
+        "componentNames": "script.MonsterManager",
+        "jsonString": {
+          "name": "MonsterManager",
+          "path": "/common/Manager/MonsterManager",
+          "nameEditable": true,
+          "enable": true,
+          "visible": true,
+          "localize": false,
+          "displayOrder": 3,
+          "pathConstraints": "///",
+          "revision": 1,
+          "modelId": null,
+          "@components": [
+            {
+              "@type": "script.MonsterManager",
+              "Enable": true
+            }
+          ],
+          "@version": 1
+        }
+      },
+      {
+        "id": "df8d8de0-9c09-4f5b-b5f6-5dc345255206",
+        "path": "/common/Manager/PlayerManager",
+        "componentNames": "script.PlayerManager",
+        "jsonString": {
+          "name": "PlayerManager",
+          "path": "/common/Manager/PlayerManager",
+          "nameEditable": true,
+          "enable": true,
+          "visible": true,
+          "localize": false,
+          "displayOrder": 4,
+          "pathConstraints": "///",
+          "revision": 1,
+          "modelId": null,
+          "@components": [
+            {
+              "@type": "script.PlayerManager",
+              "Enable": true
+            }
+          ],
+          "@version": 1
+        }
+      },
+      {
+        "id": "7de0e026-c498-4d67-9ee3-5dd851d926e5",
+        "path": "/common/Manager/GameManager",
+        "componentNames": "script.GameManager",
+        "jsonString": {
+          "name": "GameManager",
+          "path": "/common/Manager/GameManager",
+          "nameEditable": true,
+          "enable": true,
+          "visible": true,
+          "localize": false,
+          "displayOrder": 5,
+          "pathConstraints": "///",
+          "revision": 1,
+          "modelId": null,
+          "@components": [
+            {
+              "@type": "script.GameManager",
+              "Enable": true
+            }
+          ],
+          "@version": 1
+        }
+      },
+      {
+        "id": "5ec7106b-c6f7-461f-932f-45d9a504f1ba",
+        "path": "/common/Manager/StageManager",
+        "componentNames": "script.StageManager",
+        "jsonString": {
+          "name": "StageManager",
+          "path": "/common/Manager/StageManager",
+          "nameEditable": true,
+          "enable": true,
+          "visible": true,
+          "localize": false,
+          "displayOrder": 6,
+          "pathConstraints": "///",
+          "revision": 1,
+          "modelId": null,
+          "@components": [
+            {
+              "@type": "script.StageManager",
+              "Enable": true
+            }
+          ],
+          "@version": 1
+        }
+      },
+      {
+        "id": "2eb2fe06-342b-43dd-bcd0-feb6eae3550c",
+        "path": "/common/Manager/CurrencyManager",
+        "componentNames": "script.CurrencyManager",
+        "jsonString": {
+          "name": "CurrencyManager",
+          "path": "/common/Manager/CurrencyManager",
+          "nameEditable": true,
+          "enable": true,
+          "visible": true,
+          "localize": false,
+          "displayOrder": 7,
+          "pathConstraints": "///",
+          "revision": 1,
+          "modelId": null,
+          "@components": [
+            {
+              "@type": "script.CurrencyManager",
+              "Enable": true
+            }
+          ],
+          "@version": 1
+        }
+      },
+      {
+        "id": "14181374-9de7-427c-b242-7040913a4ed9",
+        "path": "/common/Manager/SeasonBossManager",
+        "componentNames": "script.SeasonBossManager",
+        "jsonString": {
+          "name": "SeasonBossManager",
+          "path": "/common/Manager/SeasonBossManager",
+          "nameEditable": true,
+          "enable": true,
+          "visible": true,
+          "localize": false,
+          "displayOrder": 8,
+          "pathConstraints": "///",
+          "revision": 1,
+          "modelId": null,
+          "@components": [
+            {
+              "@type": "script.SeasonBossManager",
+              "Enable": true
+            }
+          ],
+          "@version": 1
+        }
+      },
+      {
+        "id": "a6b4c8b3-aae1-4c70-bbfc-ee54485c1b27",
+        "path": "/common/Manager/EnemySkillManager",
+        "componentNames": "script.EnemySkillManager",
+        "jsonString": {
+          "name": "EnemySkillManager",
+          "path": "/common/Manager/EnemySkillManager",
+          "nameEditable": true,
+          "enable": true,
+          "visible": true,
+          "localize": false,
+          "displayOrder": 9,
+          "pathConstraints": "///",
+          "revision": 1,
+          "modelId": null,
+          "@components": [
+            {
+              "@type": "script.EnemySkillManager",
+              "Enable": true
+            }
+          ],
+          "@version": 1
+        }
+      },
+      {
+        "id": "0a18f7ff-5436-4199-9e4e-2873ea985d72",
+        "path": "/common/MainCamera",
+        "componentNames": "MOD.Core.TransformComponent,MOD.Core.CameraComponent,script.MainCamera",
+        "jsonString": {
+          "name": "MainCamera",
+          "path": "/common/MainCamera",
+          "nameEditable": true,
+          "enable": true,
+          "visible": true,
+          "localize": false,
+          "displayOrder": 1,
+          "pathConstraints": "//",
+          "revision": 1,
+          "origin": {
+            "type": "Model",
+            "entry_id": "mapempty",
+            "sub_entity_id": null,
+            "root_entity_id": "0a18f7ff-5436-4199-9e4e-2873ea985d72",
+            "replaced_model_id": null
+          },
+          "modelId": "mapempty",
+          "@components": [
+            {
+              "@type": "MOD.Core.TransformComponent",
+              "Rotation": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 0.0
+              },
+              "Position": {
+                "x": 0.0,
+                "y": 10.0,
+                "z": 999.999
+              },
+              "QuaternionRotation": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 0.0,
+                "w": 1.0
+              },
+              "ZRotation": 0.0,
+              "Enable": true
+            },
+            {
+              "@type": "MOD.Core.CameraComponent",
+              "Enable": true
+            },
+            {
+              "@type": "script.MainCamera",
+              "Enable": true
+            }
+          ],
+          "@version": 1
+        }
+      }
+    ]
+  }
+}

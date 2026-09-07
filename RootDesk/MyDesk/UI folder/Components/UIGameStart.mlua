@@ -1,0 +1,16 @@
+@Component
+script UIGameStart extends Component
+
+	@EventSender("Self")
+	handler HandleButtonClickEvent(ButtonClickEvent event)
+		--------------- Native Event Sender Info ----------------
+		-- Sender: ButtonComponent
+		-- Space: Client
+		---------------------------------------------------------
+		local gmEnt = _EntityService:GetEntityByPath("/common/Manager/GameManager")
+		if isvalid(gmEnt) then
+			gmEnt.GameManager:StartRun()
+		end
+	end
+
+end

@@ -1,0 +1,150 @@
+@Component
+script UIStageBackground extends Component
+
+	property Entity Hero1 = "b533e210-b58c-4ad5-8798-78836b792136"
+
+	property Entity Hero2 = "900faaa3-dfb7-4a8d-8a86-bce8d8e73921"
+
+	property Entity Hero3 = "5280561f-49ce-4137-80f8-52b39a74c14d"
+
+	property Entity Monster1 = "73492f92-566a-4f63-bbf3-d0a6aae43628"
+
+	property Entity Monster2 = "da179fa8-e84d-4628-ab6a-642bdd9f1a45"
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		self._T.heroes   = {self.Hero1, self.Hero2, self.Hero3}
+		self._T.monsters = {self.Monster1, self.Monster2}
+		
+		-- 몬스터별 기본/피격 스프라이트 RUID
+		self._T.idleRUIDs = {
+			"93581503c27b499786db53e26b1645cb",
+			"dc932872543f4a02bf41e977ab79e5ad",
+		}
+		self._T.hitRUIDs = {
+			"bd3cb0d317f84314a4a5f0ccb33938a8",
+			"61c27025a8f14c478f30ede1b49758bc",
+		}
+		
+		-- 아바타 IDLE·ATTACK 상태 등록
+		for _, hero in ipairs(self._T.heroes) do
+			if isvalid(hero) then
+				local state = hero.StateComponent
+				if state ~= nil then
+					state:AddState("ATTACK", nil)
+					state:ChangeState("IDLE")
+				end
+			end
+		end
+		
+		-- 영웅별 독립 공격 타이머 (신궁 제외)
+		self._T.heroTimers = {}
+		local heroTimerConfigs = {{idx=1, interval=3.0}, {idx=3, interval=1.7}}
+		for _, cfg in ipairs(heroTimerConfigs) do
+			local capturedIdx = cfg.idx
+			table.insert(self._T.heroTimers, _TimerService:SetTimerRepeat(function()
+				self:HeroAttack(capturedIdx)
+			end, cfg.interval))
+		end
+		
+		-- 신궁(Hero2) shoot → 쉬기 → shoot 사이클 시작
+		self._T.hero2Active = true
+		self:MarksmasterCycle()
+		
+		-- 몬스터 피격 사이클 타이머 (2초 idle + 0.3초 피격 = 2.3초 주기)
+		self._T.monsterTimer = _TimerService:SetTimerRepeat(self.MonsterHitCycle, 2.3)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void HeroAttack(integer heroIdx)
+		local hero = self._T.heroes[heroIdx]
+		if isvalid(hero) then
+			local state = hero.StateComponent
+			if state ~= nil then state:ChangeState("ATTACK") end
+		end
+		local capHero = hero
+		self:Delay(0.85, function()
+			if isvalid(capHero) then
+				local state = capHero.StateComponent
+				if state ~= nil then state:ChangeState("IDLE") end
+			end
+		end)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void MarksmasterCycle()
+		if self._T.hero2Active ~= true then return end
+		local hero = self._T.heroes[2]
+		if isvalid(hero) == false then return end
+		local avatarRenderer = hero.AvatarGUIRendererComponent
+		if isvalid(avatarRenderer) == false then return end
+		local body = avatarRenderer:GetBodyEntity()
+		if isvalid(body) == false then return end
+		
+		-- 발사
+		local shootEvent = ActionStateChangedEvent("shoot2", "shoot2", 1.0, SpriteAnimClipPlayType.Onetime)
+		body:SendEvent(shootEvent)
+		
+		-- 발사 후 IDLE 복귀 → 대기 후 다시 사이클
+		local capHero = hero
+		self:Delay(0.9, function()
+			if self._T.hero2Active ~= true then return end
+			if isvalid(capHero) then
+				local state = capHero.StateComponent
+				if state ~= nil then state:ChangeState("IDLE") end
+			end
+			self:Delay(1.5, function()
+				self:MarksmasterCycle()
+			end)
+		end)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void MonsterHitCycle()
+		-- 피격 스프라이트로 교체
+		for i, monster in ipairs(self._T.monsters) do
+			if isvalid(monster) then
+				local spr = monster.SpriteGUIRendererComponent
+				if spr ~= nil then
+					spr.ImageRUID = DataRef(self._T.hitRUIDs[i])
+				end
+			end
+		end
+		-- 0.3초 뒤 기본 스프라이트로 복귀
+		local capMonsters = self._T.monsters
+		local capIdleRUIDs = self._T.idleRUIDs
+		self:Delay(0.3, function()
+			for i, monster in ipairs(capMonsters) do
+				if isvalid(monster) then
+					local spr = monster.SpriteGUIRendererComponent
+					if spr ~= nil then
+						spr.ImageRUID = DataRef(capIdleRUIDs[i])
+					end
+				end
+			end
+		end)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Delay(number seconds, any callback)
+		local t = _TweenLogic:MakeTween(0, 1, seconds, EaseType.Linear, function(v) end)
+		t:SetOnEndCallback(callback)
+		t:Play()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		self._T.hero2Active = false
+		if self._T.heroTimers then
+			for _, timerId in ipairs(self._T.heroTimers) do
+				_TimerService:ClearTimer(timerId)
+			end
+			self._T.heroTimers = nil
+		end
+		if self._T.monsterTimer then
+			_TimerService:ClearTimer(self._T.monsterTimer)
+			self._T.monsterTimer = nil
+		end
+	end
+
+end

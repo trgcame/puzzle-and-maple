@@ -1,0 +1,11 @@
+﻿id,EnemyId,SkillId,SkillName,SkillCategory,TriggerType,TriggerValue,TargetType,GimmickType,GimmickParam,SkillDescription
+1,seasonboss_1,gimmick_phase2,방어막,buff,phase_change,2,,shield_magic,0.5,방어막 활성화
+2,seasonboss_1,gimmick_phase3,전체공격,attack,phase_change,3,all,attack_all,2.0,전체 공격 강화
+3,erda_lantern,lantern_block_heal,회복 봉인,debuff,every_n_turns,3,all,,,2턴간 영웅 회복 금지
+4,arma,arma_summon,부하 소환,summon,every_n_turns,4,,,,부하 몬스터 2마리를 소환합니다
+5,seasonboss_1,balrog_smash,파멸의 강타,attack,every_n_turns,3,all,,,3턴마다 전체 공격 2배
+6,seasonboss_1,balrog_seal,회복 봉인,debuff,every_n_turns,5,all,,,5턴마다 2턴간 파티 회복 금지
+7,seasonboss_1,balrog_pierce,심연의 일격,attack,every_n_turns,7,front,,,7턴마다 선두 1인에게 강력한 단일 공격
+8,churup_tree,churup_smash,대지의 진노,attack,every_n_turns,3,all,,,3턴마다 전체에게 강력한 공격
+9,weakened_harmony_spirit,harmony_collapse,조화의 붕괴,attack,every_n_turns,3,back,,,3턴마다 후열 1인에게 강력한 단일 공격
+10,adoratio,adoratio_regen,심연의 재생,passive,every_n_turns,3,,,,3턴마다 자신의 최대 체력 20% 회복

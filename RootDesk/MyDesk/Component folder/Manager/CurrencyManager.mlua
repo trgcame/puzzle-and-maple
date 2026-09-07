@@ -1,0 +1,359 @@
+@Component
+script CurrencyManager extends Component
+
+	property TextGUIRendererComponent txtGold = "c014a8fc-0d6b-4f2c-807b-2c3df5597b7c"
+
+	property TextGUIRendererComponent txtTicket = "c9b146a2-b881-460c-8762-9ca4742b41f4"
+
+	property TextGUIRendererComponent txtStone = "f31bd575-2d11-4c7c-bde6-97785c5c799c"
+
+	-- 방치 보상 파라미터. 서버 지급(`RequestClaimIdleReward`)과 클라 표시(`GetPending*`)가
+	-- **같은 값을 봐야** 표시와 실지급이 어긋나지 않는다. 숫자를 코드에 박지 말 것.
+	property integer IdleCapHours = 12
+
+	property integer IdleUnitSeconds = 600
+
+	method void OnBeginPlay()
+		if self:IsServer() then
+			self._T.cache = {}
+			self._T.dirty = {}
+			self._T.flushTimer = _TimerService:SetTimerRepeat(function()
+				self:_FlushDirty()
+			end, 60.0)
+		else
+			self._T.gold            = 0
+			self._T.ticket          = 0
+			self._T.stone           = 0
+			self._T.lastRewardTime  = 0
+			self._T.maxClearedStage = 0
+			self:RequestCurrencyData()
+		end
+	end
+
+	method void OnEndPlay()
+		-- ⚠️ **여기서 저장하지 않는다.** MSW 공식 가이드: `OnEndPlay`에서 `SetAndWait`/`SetAsync`를
+		--    호출하면 유저가 재입장할 때 **이전 저장이 제대로 로드되지 않을 수 있다.**
+		--    저장은 아래 `UserLeaveEvent` 핸들러(공식이 지정한 자리) + 60초 주기 flush가 맡는다.
+		if self:IsServer() then
+			_TimerService:ClearTimer(self._T.flushTimer)
+		end
+	end
+
+	@EventSender("Service", "UserService")
+	handler HandleUserLeaveEvent(UserLeaveEvent event)
+		-- 나가는 유저의 변경분만 즉시 저장한다.
+		-- `_SavePlayer`가 맨 앞에서 dirty를 검사하므로, 진행이 없었으면 아무것도 쓰지 않는다
+		-- → 반복 입퇴장만으로는 DataStorage 비용이 발생하지 않는다.
+		if not self:IsServer() then return end
+		local userId = event.UserId
+		if userId == nil or userId == "" then return end
+		if self._T.dirty == nil or not self._T.dirty[userId] then return end
+		self:_SavePlayer(userId)
+		log("[CurrencyManager] 퇴장 저장 userId=" .. tostring(userId))
+	end
+
+	@ExecSpace("ServerOnly")
+	method void _EnsureLoaded(string userId)
+		if self._T.cache[userId] == nil then
+			self:_LoadPlayer(userId)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void _LoadPlayer(string userId)
+		local storage = _DataStorageService:GetUserDataStorage(userId)
+		local errCode, raw = storage:GetAndWait("currency")
+		if errCode == 0 and raw ~= nil and raw ~= "" then
+			self._T.cache[userId] = _UtilLogic:StringToTable(raw)
+			local d = self._T.cache[userId]
+			d.gold   = tonumber(d.gold)   or 0
+			d.ticket = tonumber(d.ticket) or 0
+			d.stone  = tonumber(d.stone)  or 0
+		else
+			-- 신규 유저 초기 지급. 메소는 2026-09-07 경제 재설계에서 시급과 같은 6.8배로 맞췄다
+			-- (1~10강 기대 비용이 8,139 메소라 34,000이면 첫날 강화를 충분히 굴려 볼 수 있다).
+			self._T.cache[userId] = { gold = 34000, ticket = 3, stone = 10 }
+		end
+		local d = self._T.cache[userId]
+		d.lastRewardTime    = tonumber(d.lastRewardTime)    or os.time()
+		d.maxClearedStage   = tonumber(d.maxClearedStage)   or 0
+		self._T.dirty[userId] = false
+	end
+
+	@ExecSpace("ServerOnly")
+	method void _SavePlayer(string userId)
+		if not self._T.dirty[userId] then return end
+		local d = self._T.cache[userId]
+		if d == nil then return end
+		local storage = _DataStorageService:GetUserDataStorage(userId)
+		local raw = _UtilLogic:TableToString(d)
+		storage:SetAsync("currency", raw, function(errCode, key)
+			if errCode ~= 0 then
+				log_warning("[CurrencyManager] 저장 실패: " .. tostring(userId))
+			else
+				self._T.dirty[userId] = false
+			end
+		end)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void _FlushDirty()
+		for userId, dirty in pairs(self._T.dirty) do
+			if dirty then self:_SavePlayer(userId) end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer ServerGetGold(string userId)
+		self:_EnsureLoaded(userId)
+		return tonumber(self._T.cache[userId].gold) or 0
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer ServerGetStone(string userId)
+		self:_EnsureLoaded(userId)
+		return tonumber(self._T.cache[userId].stone) or 0
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer ServerGetTicket(string userId)
+		self:_EnsureLoaded(userId)
+		return tonumber(self._T.cache[userId].ticket) or 0
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ServerAdd(string userId, string currencyType, integer amount)
+		self:_EnsureLoaded(userId)
+		local d = self._T.cache[userId]
+		d[currencyType] = (tonumber(d[currencyType]) or 0) + amount
+		self._T.dirty[userId] = true
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean ServerSpend(string userId, string currencyType, integer amount)
+		self:_EnsureLoaded(userId)
+		local d = self._T.cache[userId]
+		local cur = tonumber(d[currencyType]) or 0
+		if cur < amount then return false end
+		d[currencyType] = cur - amount
+		self._T.dirty[userId] = true
+		return true
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ServerPushToClient(string userId)
+		self:_EnsureLoaded(userId)
+		local d = self._T.cache[userId]
+		self:ReceiveCurrencyData(
+			math.floor(d.gold            or 0),
+			math.floor(d.ticket          or 0),
+			math.floor(d.stone           or 0),
+			math.floor(d.lastRewardTime  or 0),
+			math.floor(d.maxClearedStage or 1),
+			userId
+		)
+	end
+
+	@ExecSpace("Server")
+	method void RequestCurrencyData()
+		local userId = senderUserId
+		self:ServerPushToClient(userId)
+	end
+
+	@ExecSpace("Client")
+	method void ReceiveCurrencyData(integer gold, integer ticket, integer stone, integer lastRewardTime, integer maxClearedStage)
+		self._T.gold            = gold
+		self._T.ticket          = ticket
+		self._T.stone           = stone
+		self._T.lastRewardTime  = lastRewardTime
+		self._T.maxClearedStage = maxClearedStage
+		self:RefreshUI()
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer GetGold()
+		return self._T.gold or 0
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer GetTicket()
+		return self._T.ticket or 0
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer GetStone()
+		return self._T.stone or 0
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer GetLastRewardTime()
+		return self._T.lastRewardTime or os.time()
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer GetMaxClearedStage()
+		return self._T.maxClearedStage or 0
+	end
+
+	method table _RewardRateForStage(integer stage)
+		-- 스테이지별 방치보상 시급. 서버 지급과 클라 표시가 어긋나지 않도록 양쪽이 이 함수만 쓴다.
+		--
+		-- 🔴 이 두 줄이 **경제 전체의 기준점**이다(2026-09-07 재설계 — GDD §4.7).
+		--    스타포스가 유일한 대형 소비처라, 강화 비용표와 **한 쌍으로만** 의미가 있다.
+		--    현재 설정의 목표: **200스테이지에서 0→22강이 30일**(메소·결정석이 동시에 병목).
+		--    한쪽만 만지면 목표가 깨지므로 `StarforceSet.GoldCost`와 항상 같이 볼 것.
+		--
+		--  · 메소  1,080 → **112,800** +(s-1)×290  — 강화 비용을 1/10로 낮추고 모자란 6.8배를 여기서 메웠다
+		--  · 결정석  360 →     **217** +(s-1)×0.56 — 결정석이 메소보다 26배 남아돌아 지급을 줄였다
+		--
+		-- 🔴 **기울기가 완만한 게 의도다**(2026-09-07 사용자 결정 — "굳이 스테이지를 더 높게 올려
+		--    시간을 쓰게 하고 싶지 않다"). 처음엔 `7,400 +(s-1)×830`이었는데 그러면 1스테이지 627일 /
+		--    100스테이지 57일 / 200스테이지 30일이라, **수급을 위해 200까지 미는 게 강제**였다.
+		--    지금은 1스테이지 45일 → 500스테이지 20일로, 올리면 이득이지만 강제는 아니다.
+		--    기울기를 다시 세우면 그 강제가 되살아난다.
+		local s = stage or 1
+		if s < 1 then s = 1 end
+		return {
+			goldPerHour  = 112800 + (s - 1) * 290,
+			stonePerHour = 217    + (s - 1) * 0.56,
+		}
+	end
+
+	@ExecSpace("ServerOnly")
+	method table _CalcRewardRate(integer stage)
+		-- 서버 지급 계산용 래퍼.
+		return self:_RewardRateForStage(stage)
+	end
+
+	-- 🗑️ `_StageRewardConfig` / `_StageClearReward` 제거 (2026-09-06 — GDD §9)
+	--    스테이지 클리어 보상을 **지급하지 않기로** 하면서 `StageRewardSet` 파서와 보상 공식을 걷어냈다.
+	--    메소·결정석의 획득처는 **방치보상 + 가챠**로 남는다(둘 다 소비처가 있어 순환은 그대로 닫힌다).
+
+	@ExecSpace("ServerOnly")
+	method void _AdvanceMaxStage(string userId, integer stage)
+		-- 최고 클리어 스테이지 갱신. **재화 지급은 없다**(2026-09-06 — GDD §9).
+		-- ⚠️ 보상은 없어졌지만 이 갱신 자체는 여전히 핵심이다 —
+		--    진입 스테이지(`GameManager:StartRun`) · 방치보상 시급(`_RewardRateForStage`) ·
+		--    스테이지 랭킹이 전부 `maxClearedStage`를 본다.
+		-- 단조 증가라 클라가 같은 요청을 반복해도 뒤로 가지 않는다.
+		self:_EnsureLoaded(userId)
+		local d   = self._T.cache[userId]
+		local cur = tonumber(d.maxClearedStage) or 0
+		if stage <= cur then return end
+
+		d.maxClearedStage = stage
+		self._T.dirty[userId] = true
+		log("[CurrencyManager] 최고 클리어 스테이지 " .. tostring(cur) .. " → " .. tostring(stage))
+	end
+
+	@ExecSpace("Server")
+	method void RequestUpdateMaxStage(integer stage)
+		local userId = senderUserId
+		self:_AdvanceMaxStage(userId, stage)
+		self:ServerPushToClient(userId)
+	end
+
+	@ExecSpace("Server")
+	method void RequestClaimIdleReward()
+		local userId = senderUserId
+		self:_EnsureLoaded(userId)
+		local d = self._T.cache[userId]
+		
+		local now      = os.time()
+		local lastTime = tonumber(d.lastRewardTime) or now
+		local capSec   = self.IdleCapHours * 3600
+		local rawSec   = now - lastTime
+		if rawSec < 0 then rawSec = 0 end             -- 서버 시계가 뒤로 갔을 때 방어
+		local capped   = rawSec > capSec
+		local elapsed  = capped and capSec or rawSec
+
+		local unitSec = self.IdleUnitSeconds
+		local units   = math.floor(elapsed / unitSec)
+		if units < 1 then
+			self:ReceiveIdleRewardResult(0, 0, userId)
+			return
+		end
+
+		local stage = tonumber(d.maxClearedStage) or 1
+		local rate  = self:_CalcRewardRate(stage)
+		local hours = (units * unitSec) / 3600
+		local goldEarned  = math.floor(rate.goldPerHour  * hours)
+		local stoneEarned = math.floor(rate.stonePerHour * hours)
+
+		d.gold  = (tonumber(d.gold)  or 0) + goldEarned
+		d.stone = (tonumber(d.stone) or 0) + stoneEarned
+
+		if capped then
+			-- 🔴 상한을 넘긴 **초과분은 버린다.**
+			--    `lastTime + units*unitSec`로 전진시키면 잘라낸 시간이 그대로 남아
+			--    **연타 두 번으로 상한을 우회**한다(20시간 방치 → 12h + 8h를 모두 수령).
+			--    잔여분(단위에 못 미친 나머지)만 남기고 나머지는 now로 민다.
+			d.lastRewardTime = now - (elapsed - units * unitSec)
+		else
+			-- 상한 안이면 지급한 단위만큼만 전진 — 10분에 못 미친 잔여분은 보존한다.
+			d.lastRewardTime = lastTime + units * unitSec
+		end
+		self._T.dirty[userId] = true
+		
+		self:ReceiveIdleRewardResult(goldEarned, stoneEarned, userId)
+		self:ServerPushToClient(userId)
+	end
+
+	@ExecSpace("Client")
+	method void ReceiveIdleRewardResult(integer gold, integer stone)
+		self._T.lastClaimedGold  = gold
+		self._T.lastClaimedStone = stone
+		-- 응답이 도착할 때마다 증가한다. UI가 "내가 보낸 요청의 결과가 왔는지"를 이걸로 판별해
+		-- 수령 직전의 낡은 값을 잠깐 띄우는 일을 막는다(`UIBox` 참조).
+		self._T.claimSeq = (self._T.claimSeq or 0) + 1
+		log("[CurrencyManager] 방치 보상 수령: Gold+" .. tostring(gold) .. " Stone+" .. tostring(stone))
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer GetClaimSeq()
+		-- 수령 응답 카운터. 값이 바뀌면 새 결과가 도착한 것이다.
+		return self._T.claimSeq or 0
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer _PendingUnits()
+		-- 수령 대기 단위 수. 서버 지급식(`RequestClaimIdleReward`)과 **같은 상한·같은 단위**를 쓴다.
+		-- 숫자를 따로 박아 두면 표시와 실지급이 조용히 어긋난다.
+		local raw = os.time() - (self._T.lastRewardTime or os.time())
+		if raw < 0 then raw = 0 end
+		raw = math.min(raw, self.IdleCapHours * 3600)
+		return math.floor(raw / self.IdleUnitSeconds)
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer GetPendingGold()
+		-- 수령 대기 골드. 단위 수 × (시급 × 단위초 / 3600) — 서버와 같은 `_RewardRateForStage`를 쓴다.
+		local rate = self:_RewardRateForStage(self._T.maxClearedStage or 0)
+		return math.floor(rate.goldPerHour * (self:_PendingUnits() * self.IdleUnitSeconds) / 3600)
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer GetPendingStone()
+		-- 수령 대기 강화석. 계산식은 골드와 동일.
+		local rate = self:_RewardRateForStage(self._T.maxClearedStage or 0)
+		return math.floor(rate.stonePerHour * (self:_PendingUnits() * self.IdleUnitSeconds) / 3600)
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer GetLastClaimedGold()
+		return self._T.lastClaimedGold or 0
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer GetLastClaimedStone()
+		return self._T.lastClaimedStone or 0
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshUI()
+		if isvalid(self.txtGold)   then self.txtGold.Text   = tostring(self._T.gold   or 0) end
+		if isvalid(self.txtTicket) then self.txtTicket.Text = tostring(self._T.ticket or 0) end
+		if isvalid(self.txtStone)  then self.txtStone.Text  = tostring(self._T.stone  or 0) end
+	end
+
+end

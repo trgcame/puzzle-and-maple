@@ -1,0 +1,23 @@
+@Component
+script UIShopOpen extends Component
+
+	property Entity ShopPanel = "b02c279e-a351-4c17-ab87-2eb768f895bb"
+
+	@EventSender("Self")
+	handler HandleButtonClickEvent(ButtonClickEvent event)
+		--------------- Native Event Sender Info ----------------
+		-- Sender: ButtonComponent
+		-- Space: Client
+		---------------------------------------------------------
+		-- 로비 상점 버튼. 가챠 화면(Shop 그룹)을 켠다.
+		-- navStack을 쓰지 않는 이유: Stage 패널과 같은 토글형 오버레이라
+		-- UIManager:GoBack()으로는 닫히지 않는다(Phase 1에서 겪은 문제).
+		if not isvalid(self.ShopPanel) then
+			log_warning("[UIShopOpen] ShopPanel이 연결되지 않았습니다.")
+			return
+		end
+		self.ShopPanel.Enable = true
+		log("[UIShopOpen] 상점(가챠) 패널 열기")
+	end
+
+end

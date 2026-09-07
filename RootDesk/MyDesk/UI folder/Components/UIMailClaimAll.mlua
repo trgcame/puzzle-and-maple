@@ -1,0 +1,13 @@
+@Component
+script UIMailClaimAll extends Component
+
+	@EventSender("Self")
+	handler HandleButtonClickEvent(ButtonClickEvent event)
+		--------------- Native Event Sender Info ----------------
+		-- Sender: ButtonComponent
+		-- Space: Client
+		---------------------------------------------------------
+		_MailUI:OnClickClaimAll()
+	end
+
+end

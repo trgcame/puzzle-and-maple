@@ -1,0 +1,2 @@
+﻿BossId,BossName,spriteRUID,PhaseCount,Phase1HP,Phase2HP,Phase3HP,AttackDamage,Gimmick1,Gimmick2,TurnLimit,AttackEffectRUID,EndlessAtkGrowth,EndlessHP
+seasonboss_1,발록,13e6803f0e224b62a7a16a59795faad3,3,60000,60000,130000,2000,shield_magic,attack_all,30,f1cb9a7e524c407d94ce14da07e05436,1.194,100000000

@@ -1,0 +1,1407 @@
+@Component
+script BattleManager extends Component
+
+	property MonsterManager MonsterManager = "e6134141-3e3a-4af2-afd3-5ff8ee51c719"
+
+	property PlayerManager PlayerManager = "df8d8de0-9c09-4f5b-b5f6-5dc345255206"
+
+	property UIManager UIManager = "c8f5b5e2-cc2a-470e-a065-b1ef66384101"
+
+	property StageManager StageManager = "5ec7106b-c6f7-461f-932f-45d9a504f1ba"
+
+	property TurnManager TurnManager = "43e421d6-5bf3-4ec4-bb64-562f3c811a45"
+
+	property Entity NextFloorButton = "1430d429-b8ce-4965-bee9-f0db400e7ed3"
+
+	property integer StageBossTurnLimit = 20
+
+	property Entity ResultEffect = "de8771a8-226f-4962-af36-869496e84d01"
+
+	property Entity WinResultPanel = ""
+
+	property string WinEffectRUID = "728becb7bd734a62b9bf786b332faad4"
+
+	property string LoseEffectRUID = "822cfe375fea4e228074f4b7dd4da149"
+
+	property any CurrentNodeData = nil
+
+	property boolean IsBattleOver = false
+
+	property Entity monsterPartyPanel = "f2395ea3-790e-4925-bc27-f73144e5cb5b"
+
+	property Entity BattleRootPanel = "b4d85220-c04a-411c-907c-c44285fee953"
+
+	property Entity DmgNum0 = "b26d45aa-e525-4662-ae65-64f75278329b"
+
+	property Entity DmgNum1 = "fe685f37-effd-4fb1-a2c4-c36147f098ec"
+
+	property Entity DmgNum2 = "b3eae7b8-5cb0-4bb4-8dae-17a3f6c55bb2"
+
+	property Entity DmgNum3 = "e75b9a16-44ee-4ac3-b7c0-ffb0742e1b90"
+
+	property Entity DmgNum4 = "58f6aa0a-8b30-4531-b6de-8b54a3a6f22a"
+
+	property UISkillPopup SkillPopup = "9e5d938b-e382-47ad-bc2b-4bfd71a22b56"
+
+	property SeasonBossManager SeasonBossManager = "14181374-9de7-427c-b242-7040913a4ed9"
+
+	property EnemySkillManager EnemySkillManager = "a6b4c8b3-aae1-4c70-bbfc-ee54485c1b27"
+
+	@ExecSpace("ClientOnly")
+	method void StartBattle(table nodeData)
+		if nodeData == nil then return end
+		self.CurrentNodeData = nodeData
+		self.IsBattleOver = false
+		self._T.isBossMode = nodeData._isBoss == true
+		
+		-- 일반 스테이지만 InitForBattle (보스는 SeasonBossManager에서 이미 초기화)
+		if not self._T.isBossMode and isvalid(self.EnemySkillManager) then
+			self.EnemySkillManager:InitForBattle(nodeData.Type or "")
+		end
+		
+		if isvalid(self.NextFloorButton) then
+			self.NextFloorButton.Enable = false
+		end
+		
+		self:LoadVisualConfig()
+		self:PreloadPartyEffects()
+		
+		self._T.battleState = {
+			enemy = { atk_mult = 1.0, atk_debuff_turns = 0, incoming_dmg_mult = 1.0, incoming_dmg_turns = 0 },
+			party = { atk_mult = 1.0, atk_buff_turns = 0, dmg_reduce_mult = 1.0, reduce_turns = 0, hero_self_atk_mult = {}, hero_self_atk_turns = {}, healBlocked = 0 },
+		}
+		self._T.enemyTurnIndex = 0
+		
+		if self._T.isBossMode then
+			self.UIManager:ShowBossBattle()
+		else
+			self.UIManager:ShowBattle()
+		end
+		
+		-- 배경 이미지 교체
+		if nodeData.BgRUID ~= nil and nodeData.BgRUID ~= "" then
+			local battleScene = _EntityService:GetEntityByPath("/ui/BattleGroup/BattleScene")
+			if isvalid(battleScene) then
+				local spr = battleScene.SpriteGUIRendererComponent
+				if spr ~= nil then
+					spr.ImageRUID = DataRef(nodeData.BgRUID)
+				end
+			end
+		end
+		if self._T.isBossMode then
+			if isvalid(self.SeasonBossManager) then
+				self.SeasonBossManager:OnBattleReady()
+			end
+		else
+			if isvalid(self.SeasonBossManager) then
+				self.SeasonBossManager:ResetForNormalBattle()
+			end
+			self.MonsterManager:Init(nodeData)
+			-- 스테이지 보스층이면 남은 턴 표시를 켜 둔다(0턴 사용 = 만턴).
+			if self.MonsterManager:IsBossFloor() then
+				self.MonsterManager:UpdateBossFloorTurnText(0, self.StageBossTurnLimit)
+			end
+		end
+		_PuzzleLogic:StartGame()
+		_PuzzleLogic.TurnManager:StartBattle()
+		local userState = _EntityService:GetEntityByPath("/ui/BattleGroup/UserState")
+		if isvalid(userState) then userState.Enable = false end
+		self.PlayerManager:SetupPartyDisplay()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ExecutePlayerAttack(any matchResult)
+		if self.IsBattleOver then return end
+		
+		local combo        = matchResult.TotalComboCount or 0
+		local partyHeroes  = self.PlayerManager:GetPartyHeroStats()
+		local heroShieldGrants = {}  -- heroId -> 쉴드 부여량
+		local heroFiring       = {}  -- heroId -> { atkMult, matchCount, enhanced }
+		local partyAtkMult     = self._T.battleState ~= nil and self._T.battleState.party.atk_mult or 1.0
+		local allBuffSteps         = {}
+		local allDebuffSteps       = {}
+		local allAoeAttackSteps    = {}
+		local allSingleAttackSteps = {}
+		local allHealSteps         = {}
+		
+		local function appendSteps(heroSteps)
+			if heroSteps == nil then return end
+			for _, s in ipairs(heroSteps.buffSteps)         do table.insert(allBuffSteps,         s) end
+			for _, s in ipairs(heroSteps.debuffSteps)       do table.insert(allDebuffSteps,       s) end
+			for _, s in ipairs(heroSteps.aoeAttackSteps)    do table.insert(allAoeAttackSteps,    s) end
+			for _, s in ipairs(heroSteps.singleAttackSteps) do table.insert(allSingleAttackSteps, s) end
+			for _, s in ipairs(heroSteps.healSteps)         do table.insert(allHealSteps,         s) end
+		end
+		
+		-- 1단계: 모든 그룹 순회 → 영웅별 ATK 배율 누적 + 쉴드량 계산
+		for _, group in ipairs(matchResult.MatchGroups) do
+			local count    = group.Count or 0
+			local enhanced = group.EnhancedCount or 0
+			if count == 0 then continue end
+			local eType      = group.ElementType
+			local shieldMult = 1 + math.max(0, count - 3) * 0.25
+		
+			for _, hero in ipairs(partyHeroes) do
+				local isPrimary   = (hero.weaponType == eType)
+				local sameType    = (hero.weaponType == hero.secondaryWeaponType)
+				local isSecondary = (hero.secondaryWeaponType == eType and hero.secondaryWeaponType ~= "")
+				if not isPrimary and not isSecondary then continue end
+		
+				-- 이 그룹에서 해당 영웅의 ATK 기여 배율
+				local groupAtkMult = 0
+				if isPrimary   then groupAtkMult += 1.0 end
+				if isSecondary then groupAtkMult += (sameType and 0.5 or 0.3) end
+		
+				-- Shield 타입: 쉴드량 누적
+				if eType == "Shield" then
+					-- `hero.atk`은 이미 성급·스타포스가 모두 곱해진 최종 공격력이다(2026-09-06 개편).
+					local heroAtk = hero.atk * partyAtkMult
+					heroShieldGrants[hero.heroId] = (heroShieldGrants[hero.heroId] or 0)
+						+ math.floor(heroAtk * groupAtkMult * count * shieldMult)
+				end
+		
+				-- 스킬 트리거 정보 누적 (발동은 2단계에서 한 번만)
+				if heroFiring[hero.heroId] == nil then
+					heroFiring[hero.heroId] = { atkMult = groupAtkMult, matchCount = count, enhanced = enhanced }
+				else
+					local info = heroFiring[hero.heroId]
+					info.atkMult += groupAtkMult
+					if count > info.matchCount then
+						info.matchCount = count
+						info.enhanced   = enhanced
+					end
+				end
+			end
+		end
+		
+		-- 2단계: 영웅별 스킬 한 번만 발동
+		for _, hero in ipairs(partyHeroes) do
+			local info = heroFiring[hero.heroId]
+			if info ~= nil then
+				appendSteps(self:BuildHeroSkillSteps(hero, info.matchCount, combo, info.enhanced, info.atkMult))
+			end
+		end
+		
+		-- 전역 순서: 힐 → 버프 → 디버프 → 광역 공격 → 단일 공격
+		local steps = {}
+		for _, s in ipairs(allHealSteps)         do table.insert(steps, s) end
+		for _, s in ipairs(allBuffSteps)         do table.insert(steps, s) end
+		for _, s in ipairs(allDebuffSteps)       do table.insert(steps, s) end
+		for _, s in ipairs(allAoeAttackSteps)    do table.insert(steps, s) end
+		for _, s in ipairs(allSingleAttackSteps) do table.insert(steps, s) end
+		
+		for heroId, shieldAmt in pairs(heroShieldGrants) do
+			if shieldAmt > 0 then
+				local capturedId, capturedAmt = heroId, shieldAmt
+				table.insert(steps, { action = function() self.PlayerManager:GiveShieldToHero(capturedId, capturedAmt) end, duration = 0 })
+			end
+		end
+		
+		table.insert(steps, { action = function()
+			if not self.IsBattleOver then self.TurnManager:StartEnemyTurn() end
+		end, duration = 0 })
+		
+		_Queue:RunSequence(steps)
+	end
+
+	@ExecSpace("ClientOnly")
+	method table GetEnemySlots()
+		-- 이펙트를 붙일 "적 슬롯" 목록.
+		-- ⚠️ 보스전은 `MonsterManager`를 아예 초기화하지 않으므로 `GetAliveSlots()`가 **항상 빈 배열**이다.
+		--    그래서 이 함수를 안 거치면 보스전에서 디버프·발사체 연출이 조용히 사라진다.
+		if self._T.isBossMode then
+			if isvalid(self.SeasonBossManager) then
+				local s = self.SeasonBossManager:GetBossEffectSlot()
+				if isvalid(s) then return { s } end
+			end
+			return {}
+		end
+		return self.MonsterManager:GetAliveSlots()
+	end
+
+	@ExecSpace("ClientOnly")
+	method table BuildHeroSkillSteps(table hero, integer matchCount, integer combo, integer enhanced, number secMult)
+		local partyAtkMult  = self._T.battleState ~= nil and self._T.battleState.party.atk_mult or 1.0
+		local heroSelfMult  = (self._T.battleState ~= nil and self._T.battleState.party.hero_self_atk_mult ~= nil and self._T.battleState.party.hero_self_atk_mult[hero.heroId]) or 1.0
+		local ctx = {
+			atk        = hero.atk * partyAtkMult * heroSelfMult * (secMult or 1.0),
+			combo      = combo,
+			matchCount = matchCount,
+			enhanced   = enhanced,
+			isFixed    = false,
+			isAoE      = false,
+			damageMult = 1.0,
+			targetType = "front",
+		}
+		
+		-- 발동 스킬 수집 + VisualType을 카테고리별로 분류 (버프/디버프만 분류; 공격·힐은 topAttackSkill·topHealSkill에서 결정)
+		local triggered         = {}
+		local buffVisualTypes   = {}
+		local debuffVisualTypes = {}
+		local vTypeToSkillId    = {}  -- VisualType -> SkillId (팝업용)
+		local skillTiers        = {}  -- SkillId -> tier (스타포스 스킬계수 보너스 조회용)
+		
+		for tier = 0, hero.starLevel - 1 do
+			local skill = _HeroDataManager:GetHeroSkillData(hero.heroId, tier)
+			if skill == nil then continue end
+			if matchCount < skill.TriggerCount then continue end
+			if not self:CheckTriggerCondition(skill.TriggerCondition, ctx) then continue end
+			table.insert(triggered, skill)
+			skillTiers[skill.SkillId] = tier
+		
+			if skill.VisualType ~= nil and skill.VisualType ~= "" then
+				vTypeToSkillId[skill.VisualType] = skill.SkillId
+				local vCfg = self._T.visualConfig ~= nil and self._T.visualConfig[skill.VisualType] or nil
+				local cat  = vCfg ~= nil and vCfg.effectCategory or "attack"
+				if cat == "buff" then
+					local exists = false
+					for _, v in ipairs(buffVisualTypes) do if v == skill.VisualType then exists = true; break end end
+					if not exists then table.insert(buffVisualTypes, skill.VisualType) end
+				elseif cat == "debuff" then
+					local exists = false
+					for _, v in ipairs(debuffVisualTypes) do if v == skill.VisualType then exists = true; break end end
+					if not exists then table.insert(debuffVisualTypes, skill.VisualType) end
+				end
+			end
+		end
+		if #triggered == 0 then return nil end
+		
+		-- 공격 스킬과 힐 스킬 분리: 가장 높은 티어의 공격 스킬 + 힐 스킬을 각각 독립 발동
+		local topAttackSkill = triggered[1]
+		local hasTopAttack   = false
+		local topHealSkill   = triggered[1]
+		local hasTopHeal     = false
+		for i = #triggered, 1, -1 do
+			local sk = triggered[i]
+			local skHasHeal = false
+			for _, eff in ipairs(sk.effects) do
+				if eff.effectType == "heal_lowest" or eff.effectType == "heal_all" then skHasHeal = true; break end
+			end
+			if skHasHeal and not hasTopHeal then
+				topHealSkill = sk; hasTopHeal = true
+			elseif not skHasHeal and not hasTopAttack then
+				-- buff/debuff 카테고리 비주얼 스킬은 공격 스킬로 분류하지 않음 (buffSteps에서 별도 처리)
+				local vCfg = sk.VisualType ~= nil and sk.VisualType ~= ""
+					and (self._T.visualConfig ~= nil and self._T.visualConfig[sk.VisualType] or nil) or nil
+				local cat = vCfg ~= nil and vCfg.effectCategory or "attack"
+				if cat ~= "buff" and cat ~= "debuff" then
+					topAttackSkill = sk; hasTopAttack = true
+				end
+			end
+		end
+		
+		-- 회복 봉인 중이면 힐 스텝 비활성화
+		if hasTopHeal and self._T.battleState ~= nil and self._T.battleState.party.healBlocked > 0 then
+			hasTopHeal = false
+			log("[BM] 회복 봉인 중 — 힐 스텝 스킵 (healBlocked=" .. tostring(self._T.battleState.party.healBlocked) .. ")")
+		end
+		
+		-- 스텝 1 — ctx 변경 (atk 보정, isAoE, isFixed, damageMult)
+		for _, skill in ipairs(triggered) do
+			for _, eff in ipairs(skill.effects) do
+				if eff.effectType == "atk_combo_boost" then
+					ctx.atk = ctx.atk * (1 + eff.valueA * ctx.combo)
+				elseif eff.effectType == "convert_to_fixed" then
+					ctx.isFixed = true
+				elseif eff.effectType == "damage_aoe" then
+					ctx.isAoE = true
+					ctx.targetType = "all"
+				elseif eff.effectType == "damage_final_mult" then
+					ctx.damageMult = ctx.damageMult * eff.valueA
+				elseif eff.effectType == "attack_target_back" then
+					ctx.targetType = "back"
+				elseif eff.effectType == "attack_target_front3" then
+					ctx.targetType = "front3"
+					ctx.isAoE = true
+				elseif eff.effectType == "atk_match_boost" then
+					ctx.atk = ctx.atk * (1 + eff.valueA * ctx.matchCount)
+				elseif eff.effectType == "buff_self_atk" then
+					ctx.atk = ctx.atk * (1 + eff.valueA)
+				end
+			end
+		end
+		
+		-- 스텝 2 — 공격 데미지 + 힐량 독립 계산
+		local refSkill  = hasTopAttack and topAttackSkill or (hasTopHeal and topHealSkill or triggered[#triggered])
+		local matchMult = 1 + math.max(0, matchCount - 3) * refSkill.MatchCoeff
+		local enhFactor = 1 + enhanced * refSkill.EnhanceCoeff
+		local comboExp  = 1 + math.max(0, combo - 1) * refSkill.ComboCoeff
+		
+		-- 스타포스 스킬 계수 보너스: 5/10/15/20/25강에서 해당 티어 스킬의 AtkCoeff에 가산
+		local sfLevel = hero.starforceLevel or 0
+		
+		local damage = 0
+		if hasTopAttack then
+			local atkTier  = skillTiers[topAttackSkill.SkillId] or 0
+			local atkBonus = _HeroDataManager:GetSkillCoeffBonus(sfLevel, atkTier)
+			local atkCoeff = topAttackSkill.AtkCoeff + atkBonus
+			damage = math.floor(ctx.atk * atkCoeff * matchMult * enhFactor * comboExp)
+			if ctx.damageMult ~= 1.0 then damage = math.floor(damage * ctx.damageMult) end
+		end
+		
+		local healAmount = 0
+		if hasTopHeal then
+			local healTier  = skillTiers[topHealSkill.SkillId] or 0
+			local healCoeff = topHealSkill.AtkCoeff + _HeroDataManager:GetSkillCoeffBonus(sfLevel, healTier)
+			healAmount = math.floor(ctx.atk * healCoeff * matchMult * enhFactor * comboExp)
+		end
+		
+		-- 스텝 3 — 적 받는 피해 배율 (공격에만)
+		local incomingMult = self._T.battleState ~= nil and self._T.battleState.enemy.incoming_dmg_mult or 1.0
+		if incomingMult ~= 1.0 then
+			damage = math.floor(damage * incomingMult)
+		end
+		
+		-- 스텝 4 — 방어력 적용 (고정 피해 제외, 공격에만)
+		if not ctx.isFixed then
+			local defense = self.MonsterManager:GetDefense()
+			if defense > 0 then
+				damage = math.floor(damage * 10 / (10 + defense))
+			end
+		end
+		
+		local heroSlot = self.PlayerManager:GetHeroSlot(hero.heroId)
+		local atkVCfg  = hasTopAttack and topAttackSkill.VisualType ~= nil and topAttackSkill.VisualType ~= ""
+			and (self._T.visualConfig ~= nil and self._T.visualConfig[topAttackSkill.VisualType] or nil) or nil
+		local healVCfg = hasTopHeal and topHealSkill.VisualType ~= nil and topHealSkill.VisualType ~= ""
+			and (self._T.visualConfig ~= nil and self._T.visualConfig[topHealSkill.VisualType] or nil) or nil
+		
+		local buffSteps         = {}
+		local debuffSteps       = {}
+		local aoeAttackSteps    = {}
+		local singleAttackSteps = {}
+		local healSteps         = {}
+		
+		-- Step 버프: 팝업 + 버프 이펙트 + 사운드
+		for _, vType in ipairs(buffVisualTypes) do
+			if isvalid(self.SkillPopup) then
+				local sId = vTypeToSkillId[vType] or ""
+				if sId ~= "" then
+					local popup, capturedId = self.SkillPopup, sId
+					table.insert(buffSteps, { action = function() popup:Show(capturedId) end, duration = 0 })
+				end
+			end
+			local bCfg = self._T.visualConfig ~= nil and self._T.visualConfig[vType] or nil
+			if bCfg ~= nil and bCfg.heroEffectRUID ~= nil and bCfg.heroEffectRUID ~= "" then
+				local cfg, slot = bCfg, heroSlot
+				local buffHeroRate = math.max(cfg.heroPlayRate or 1, 0.01)
+				local buffDur      = cfg.duration / buffHeroRate
+				table.insert(buffSteps, {
+					action = function()
+						if cfg.soundRUID ~= nil and cfg.soundRUID ~= "" then
+							_SoundService:PlaySound(cfg.soundRUID, 1.0)
+						end
+						local bOpts = {FlipX = cfg.heroFlipX, PlayRate = cfg.heroPlayRate, Scale = cfg.heroScale, OffsetX = cfg.heroOffsetX, OffsetY = cfg.heroOffsetY, PreserveSprite = cfg.heroPreserveSprite, PlayOnce = true}
+						_Effect:PlayHeroBuffEffect(slot, cfg.heroEffectRUID, bOpts)
+						if cfg.heroEffectRUID2 ~= nil and cfg.heroEffectRUID2 ~= "" then
+							_Effect:PlayHeroBuffEffect(slot, cfg.heroEffectRUID2, bOpts)
+						end
+						if cfg.heroEffectRUID3 ~= nil and cfg.heroEffectRUID3 ~= "" then
+							_Effect:PlayHeroBuffEffect(slot, cfg.heroEffectRUID3, bOpts)
+						end
+					end,
+					duration = buffDur,
+				})
+			end
+		end
+		
+		-- Step 디버프: 팝업 + 디버프 이펙트 + 사운드
+		for _, vType in ipairs(debuffVisualTypes) do
+			if isvalid(self.SkillPopup) then
+				local sId = vTypeToSkillId[vType] or ""
+				if sId ~= "" then
+					local popup, capturedId = self.SkillPopup, sId
+					table.insert(debuffSteps, { action = function() popup:Show(capturedId) end, duration = 0 })
+				end
+			end
+			local dCfg = self._T.visualConfig ~= nil and self._T.visualConfig[vType] or nil
+			if dCfg ~= nil then
+				local cfg, slot = dCfg, heroSlot
+				local debuffHeroRate = math.max(cfg.heroPlayRate or 1, 0.01)
+				local debuffDur      = cfg.duration / debuffHeroRate
+				table.insert(debuffSteps, {
+					action = function()
+						if cfg.soundRUID ~= nil and cfg.soundRUID ~= "" then
+							_SoundService:PlaySound(cfg.soundRUID, 1.0)
+						end
+						if cfg.heroEffectRUID ~= nil and cfg.heroEffectRUID ~= "" then
+							_Effect:PlayHeroDebuffEffect(slot, cfg.heroEffectRUID, {FlipX = cfg.heroFlipX, PlayRate = cfg.heroPlayRate, Scale = cfg.heroScale, OffsetX = cfg.heroOffsetX, OffsetY = cfg.heroOffsetY, PreserveSprite = cfg.heroPreserveSprite})
+						end
+						if cfg.monsterEffectRUID ~= nil and cfg.monsterEffectRUID ~= "" then
+							local aliveSlots = self:GetEnemySlots()
+							local mOpts = {PlayRate = cfg.monsterPlayRate, Scale = cfg.monsterScale, OffsetX = cfg.monsterOffsetX, OffsetY = cfg.monsterOffsetY}
+							for _, ms in ipairs(aliveSlots) do
+								_Effect:PlayMonsterDebuffEffect(ms, cfg.monsterEffectRUID, mOpts)
+							end
+						end
+					end,
+					duration = debuffDur,
+				})
+			end
+		end
+		
+		-- Step 공격: topAttackSkill 비주얼 → 데미지 적용 → 상태 변경
+		if hasTopAttack then
+			local atkBucket = ctx.isAoE and aoeAttackSteps or singleAttackSteps
+			if isvalid(self.SkillPopup) and topAttackSkill.SkillId ~= nil and topAttackSkill.SkillId ~= "" then
+				local popup, sId = self.SkillPopup, topAttackSkill.SkillId
+				table.insert(atkBucket, { action = function() popup:Show(sId) end, duration = 0 })
+			end
+			if atkVCfg ~= nil then
+				local cfg, slot, panel = atkVCfg, heroSlot, self.BattleRootPanel
+				local root = self.BattleRootPanel
+				local isProjectile = cfg.projectileDuration ~= nil and cfg.projectileDuration > 0
+				local heroRate   = math.max(cfg.heroPlayRate   or 1, 0.01)
+				local screenRate = math.max(cfg.screenPlayRate or 1, 0.01)
+				local heroDur    = cfg.duration / heroRate
+				local screenDur  = cfg.screenDuration / screenRate
+				local attackWait = isProjectile and cfg.projectileDuration or math.max(heroDur, screenDur, 0)
+				table.insert(atkBucket, {
+					action = function()
+						if isProjectile then
+							_Effect:PlayHeroAttackEffect(slot, cfg.heroEffectRUID or "", {FlipX = cfg.heroFlipX, PlayRate = cfg.heroPlayRate, Duration = cfg.projectileDuration, Scale = cfg.heroScale, OffsetX = cfg.heroOffsetX, OffsetY = cfg.heroOffsetY, PreserveSprite = cfg.heroPreserveSprite, PlayOnce = true})
+							if cfg.projectileEffectRUID ~= nil and cfg.projectileEffectRUID ~= "" and isvalid(root) then
+								local aliveSlots = self:GetEnemySlots()
+								local targetSlot = #aliveSlots > 0 and aliveSlots[1] or nil
+								if isvalid(targetSlot) then
+									_Effect:PlayProjectileEffect(cfg.projectileEffectRUID, slot, targetSlot, root, cfg.projectileDuration, {FlipX = cfg.projectileFlipX, Scale = cfg.projectileScale})
+								end
+							end
+						else
+							if cfg.heroEffectRUID ~= nil and cfg.heroEffectRUID ~= "" then
+								_Effect:PlayHeroAttackEffect(slot, cfg.heroEffectRUID, {FlipX = cfg.heroFlipX, PlayRate = cfg.heroPlayRate, Duration = heroDur, Scale = cfg.heroScale, OffsetX = cfg.heroOffsetX, OffsetY = cfg.heroOffsetY, PreserveSprite = cfg.heroPreserveSprite, PlayOnce = true})
+							end
+							if cfg.heroEffectRUID2 ~= nil and cfg.heroEffectRUID2 ~= "" then
+								_Effect:PlayHeroAttackEffect(slot, cfg.heroEffectRUID2, {FlipX = cfg.heroFlipX, PlayRate = cfg.heroPlayRate, Duration = heroDur, Scale = cfg.heroScale, OffsetX = cfg.heroOffsetX, OffsetY = cfg.heroOffsetY, PreserveSprite = cfg.heroPreserveSprite, PlayOnce = true})
+							end
+							if cfg.heroEffectRUID3 ~= nil and cfg.heroEffectRUID3 ~= "" then
+								_Effect:PlayHeroAttackEffect(slot, cfg.heroEffectRUID3, {FlipX = cfg.heroFlipX, PlayRate = cfg.heroPlayRate, Duration = heroDur, Scale = cfg.heroScale, OffsetX = cfg.heroOffsetX, OffsetY = cfg.heroOffsetY, PreserveSprite = cfg.heroPreserveSprite, PlayOnce = true})
+							end
+						end
+						if cfg.screenEffectRUID ~= nil and cfg.screenEffectRUID ~= "" then
+							if isvalid(panel) then
+								_Effect:PlayEffect(cfg.screenEffectRUID, panel, Vector2(0, 0), {PreserveSprite = "None", FitParent = true, PlayRate = cfg.screenPlayRate, PlayOnce = true})
+							end
+						end
+						if cfg.screenEffectRUID2 ~= nil and cfg.screenEffectRUID2 ~= "" then
+							if isvalid(panel) then
+								_Effect:PlayEffect(cfg.screenEffectRUID2, panel, Vector2(0, 0), {PreserveSprite = "None", FitParent = true, PlayRate = cfg.screenPlayRate, PlayOnce = true})
+							end
+						end
+						if cfg.screenEffectRUID3 ~= nil and cfg.screenEffectRUID3 ~= "" then
+							if isvalid(panel) then
+								_Effect:PlayEffect(cfg.screenEffectRUID3, panel, Vector2(0, 0), {PreserveSprite = "None", FitParent = true, PlayRate = cfg.screenPlayRate, PlayOnce = true})
+							end
+						end
+						if cfg.soundRUID ~= nil and cfg.soundRUID ~= "" then
+							_SoundService:PlaySound(cfg.soundRUID, 1.0)
+						end
+					end,
+					duration = attackWait,
+				})
+			end
+			local dmg, isAoE, targetType, aCfg = damage, ctx.isAoE, ctx.targetType, atkVCfg
+			local monsterRate = aCfg ~= nil and math.max(aCfg.monsterPlayRate or 1, 0.01) or 1
+			local monsterWait = aCfg ~= nil and aCfg.monsterDuration / monsterRate or 0
+			table.insert(atkBucket, {
+				action = function()
+					if self.IsBattleOver then return end
+					if aCfg ~= nil and aCfg.monsterSoundRUID ~= nil and aCfg.monsterSoundRUID ~= "" then
+						_SoundService:PlaySound(aCfg.monsterSoundRUID, 1.0)
+					end
+					-- 보스 모드 분기
+					if self._T.isBossMode then
+						if isvalid(self.SeasonBossManager) then
+							local bossDefeated = self.SeasonBossManager:ApplyBossDamage(dmg)
+							local bossSlot = self.SeasonBossManager:GetBossTargetSlot()
+							self:_ShowDamageAt(dmg, bossSlot)
+		
+							-- ⚠️ 보스는 몬스터 슬롯을 쓰지 않는다. 일반 전투는 아래 비보스 경로에서
+							-- 피격 이펙트를 재생하는데, 보스는 여기서 return하므로 **타격 연출이
+							-- 통째로 비어 있었다.** 보스 몸통에 직접 건다.
+							local fxSlot = self.SeasonBossManager:GetBossEffectSlot()
+							if aCfg ~= nil and isvalid(fxSlot) then
+								local mOpts = {PlayRate = aCfg.monsterPlayRate, PlayOnce = true, Scale = aCfg.monsterScale, OffsetX = aCfg.monsterOffsetX, OffsetY = aCfg.monsterOffsetY}
+								if aCfg.monsterEffectRUID ~= nil and aCfg.monsterEffectRUID ~= "" then
+									_Effect:PlayMonsterHitEffectSync(fxSlot, aCfg.monsterEffectRUID, mOpts)
+								end
+								if aCfg.monsterEffectRUID2 ~= nil and aCfg.monsterEffectRUID2 ~= "" then
+									_Effect:PlayMonsterHitEffectSync(fxSlot, aCfg.monsterEffectRUID2, mOpts)
+								end
+								if aCfg.monsterEffectRUID3 ~= nil and aCfg.monsterEffectRUID3 ~= "" then
+									_Effect:PlayMonsterHitEffectSync(fxSlot, aCfg.monsterEffectRUID3, mOpts)
+								end
+							end
+		
+							if bossDefeated then
+								self.IsBattleOver = true
+								_Queue:StopSequence()
+								self.SeasonBossManager:OnBossDefeated()
+							end
+						end
+						return
+					end
+					if isAoE then
+						local mOpts = aCfg ~= nil and {PlayRate = aCfg.monsterPlayRate, PlayOnce = true, Scale = aCfg.monsterScale, OffsetX = aCfg.monsterOffsetX, OffsetY = aCfg.monsterOffsetY} or nil
+						if targetType == "front3" then
+							local frontSlots = self.MonsterManager:GetFrontNSlots(3)
+							self.MonsterManager:ApplyDamageFrontN(dmg, 3)
+							for _, fs in ipairs(frontSlots) do self:_ShowDamageAt(dmg, fs) end
+							if aCfg ~= nil then
+								if aCfg.monsterEffectRUID ~= nil and aCfg.monsterEffectRUID ~= "" then
+									_Effect:PlayAoeHitEffectSync(frontSlots, aCfg.monsterEffectRUID, mOpts)
+								end
+								if aCfg.monsterEffectRUID2 ~= nil and aCfg.monsterEffectRUID2 ~= "" then
+									_Effect:PlayAoeHitEffectSync(frontSlots, aCfg.monsterEffectRUID2, mOpts)
+								end
+								if aCfg.monsterEffectRUID3 ~= nil and aCfg.monsterEffectRUID3 ~= "" then
+									_Effect:PlayAoeHitEffectSync(frontSlots, aCfg.monsterEffectRUID3, mOpts)
+								end
+							end
+						else
+							local preAlive = self.MonsterManager:GetAliveSlots()
+							self.MonsterManager:ApplyDamageAll(dmg)
+							for _, ps in ipairs(preAlive) do self:_ShowDamageAt(dmg, ps) end
+							if aCfg ~= nil then
+								local aliveS = self.MonsterManager:GetAliveSlots()
+								if aCfg.monsterEffectRUID ~= nil and aCfg.monsterEffectRUID ~= "" then
+									_Effect:PlayAoeHitEffectSync(aliveS, aCfg.monsterEffectRUID, mOpts)
+								end
+								if aCfg.monsterEffectRUID2 ~= nil and aCfg.monsterEffectRUID2 ~= "" then
+									_Effect:PlayAoeHitEffectSync(aliveS, aCfg.monsterEffectRUID2, mOpts)
+								end
+								if aCfg.monsterEffectRUID3 ~= nil and aCfg.monsterEffectRUID3 ~= "" then
+									_Effect:PlayAoeHitEffectSync(aliveS, aCfg.monsterEffectRUID3, mOpts)
+								end
+							end
+						end
+					else
+						-- 데미지 전 타겟 슬롯 캡처 (사망 시 슬롯 교체 버그 방지)
+						local targetSlot = self.MonsterManager:GetTargetSlot(targetType)
+						if targetType == "back" then
+							self.MonsterManager:ApplyDamageBack(dmg)
+						else
+							self.MonsterManager:ApplyDamageSingle(dmg)
+						end
+						self:_ShowDamageAt(dmg, targetSlot)
+						if aCfg ~= nil and isvalid(targetSlot) then
+							local mOpts = {PlayRate = aCfg.monsterPlayRate, PlayOnce = true, Scale = aCfg.monsterScale, OffsetX = aCfg.monsterOffsetX, OffsetY = aCfg.monsterOffsetY}
+							-- 데미지로 슬롯이 비활성화됐어도 이펙트 표시를 위해 임시 활성화
+							local wasDisabled = not targetSlot.Enable
+							if wasDisabled then targetSlot.Enable = true end
+							if aCfg.monsterEffectRUID ~= nil and aCfg.monsterEffectRUID ~= "" then
+								_Effect:PlayMonsterHitEffectSync(targetSlot, aCfg.monsterEffectRUID, mOpts)
+							end
+							if aCfg.monsterEffectRUID2 ~= nil and aCfg.monsterEffectRUID2 ~= "" then
+								_Effect:PlayMonsterHitEffectSync(targetSlot, aCfg.monsterEffectRUID2, mOpts)
+							end
+							if aCfg.monsterEffectRUID3 ~= nil and aCfg.monsterEffectRUID3 ~= "" then
+								_Effect:PlayMonsterHitEffectSync(targetSlot, aCfg.monsterEffectRUID3, mOpts)
+							end
+							if wasDisabled then
+								local ts = targetSlot
+								_TimerService:SetTimerOnce(function()
+									if isvalid(ts) then ts.Enable = false end
+								end, monsterWait > 0 and monsterWait or 0.3)
+							end
+						end
+					end
+					if self.MonsterManager:IsAllDead() then
+						self.IsBattleOver = true
+						_Queue:StopSequence()
+						self:OnWin()
+					end
+				end
+				,duration = monsterWait
+			})
+			local trig = triggered
+			table.insert(atkBucket, {
+				action = function()
+					for _, skill in ipairs(trig) do
+						for _, eff in ipairs(skill.effects) do
+							local et = eff.effectType
+							if et == "debuff_enemy_atk" then
+								self._T.battleState.enemy.atk_mult *= (1.0 - eff.valueA)
+								self._T.battleState.enemy.atk_debuff_turns = math.max(self._T.battleState.enemy.atk_debuff_turns, eff.duration)
+							elseif et == "buff_incoming_damage" then
+								self._T.battleState.enemy.incoming_dmg_mult *= (1.0 + eff.valueA)
+								self._T.battleState.enemy.incoming_dmg_turns = math.max(self._T.battleState.enemy.incoming_dmg_turns, eff.duration)
+							elseif et == "buff_party_atk" then
+								self._T.battleState.party.atk_mult *= (1.0 + eff.valueA)
+								self._T.battleState.party.atk_buff_turns = math.max(self._T.battleState.party.atk_buff_turns, eff.duration)
+							elseif et == "buff_party_dmg_reduce" then
+								self._T.battleState.party.dmg_reduce_mult *= (1.0 - eff.valueA)
+								self._T.battleState.party.reduce_turns = math.max(self._T.battleState.party.reduce_turns, eff.duration)
+							elseif et == "steal_atk" then
+								self._T.battleState.enemy.atk_mult *= (1.0 - eff.valueA)
+								self._T.battleState.enemy.atk_debuff_turns = math.max(self._T.battleState.enemy.atk_debuff_turns, eff.duration)
+								local hId = hero.heroId
+								local hMap = self._T.battleState.party.hero_self_atk_mult
+								local hTurns = self._T.battleState.party.hero_self_atk_turns
+								hMap[hId] = (hMap[hId] or 1.0) * (1.0 + eff.valueA)
+								hTurns[hId] = math.max(hTurns[hId] or 0, eff.duration)
+							end
+						end
+					end
+				end
+				,duration = 0
+			})
+		end
+		
+		-- Step 힐: topHealSkill 비주얼 → 힐 적용
+		if hasTopHeal then
+			if isvalid(self.SkillPopup) and topHealSkill.SkillId ~= nil and topHealSkill.SkillId ~= "" then
+				local popup, sId = self.SkillPopup, topHealSkill.SkillId
+				table.insert(healSteps, { action = function() popup:Show(sId) end, duration = 0 })
+			end
+			if healVCfg ~= nil then
+				local cfg, slot = healVCfg, heroSlot
+				local heroRate = math.max(cfg.heroPlayRate or 1, 0.01)
+				local heroDur  = cfg.duration / heroRate
+				local healWait = math.max(heroDur, 0.6)
+				table.insert(healSteps, {
+					action = function()
+						if cfg.heroEffectRUID ~= nil and cfg.heroEffectRUID ~= "" then
+							_Effect:PlayHeroAttackEffect(slot, cfg.heroEffectRUID, {FlipX = cfg.heroFlipX, PlayRate = cfg.heroPlayRate, Duration = healWait, Scale = cfg.heroScale, OffsetX = cfg.heroOffsetX, OffsetY = cfg.heroOffsetY, PreserveSprite = cfg.heroPreserveSprite, PlayOnce = true})
+						end
+						if cfg.soundRUID ~= nil and cfg.soundRUID ~= "" then
+							_SoundService:PlaySound(cfg.soundRUID, 1.0)
+						end
+					end,
+					duration = healWait,
+				})
+			end
+			local healRef, trig = healAmount, triggered
+			table.insert(healSteps, {
+				action = function()
+					for _, skill in ipairs(trig) do
+						for _, eff in ipairs(skill.effects) do
+							local et = eff.effectType
+							if et == "heal_lowest" then
+								self.PlayerManager:ApplyHealToHeroes(healRef, "HealOne")
+							elseif et == "heal_all" then
+								self.PlayerManager:ApplyHealToHeroes(healRef, "HealAll")
+							end
+						end
+					end
+				end,
+				duration = 0,
+			})
+		end
+		
+		return { buffSteps = buffSteps, debuffSteps = debuffSteps, aoeAttackSteps = aoeAttackSteps, singleAttackSteps = singleAttackSteps, healSteps = healSteps }
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyPassiveSkills()
+		if self.IsBattleOver then return end
+		local partyHeroes = self.PlayerManager:GetPartyHeroStats()
+		for _, hero in ipairs(partyHeroes) do
+			for tier = 0, hero.starLevel - 1 do
+				local skill = _HeroDataManager:GetHeroSkillData(hero.heroId, tier)
+				if skill == nil then continue end
+				if skill.TriggerCondition ~= "passive" then continue end
+				for _, eff in ipairs(skill.effects) do
+					if eff.effectType == "enhance_random_puzzle" then
+						_PuzzleLogic:EnhanceRandomPuzzles(eff.valueA)
+					end
+				end
+			end
+		end
+	end
+
+	method boolean CheckTriggerCondition(string condition, table ctx)
+		if condition == nil or condition == "" or condition == "always" then return true end
+		if condition == "passive" then return false end
+		local colonPos, _ = string.find(condition, ":", 1, true)
+		if colonPos == nil then return true end
+		local condType = string.sub(condition, 1, colonPos - 1)
+		local condVal  = string.sub(condition, colonPos + 1)
+		if condType == "combo_gte" then
+			return ctx.combo >= (tonumber(condVal) or 3)
+		elseif condType == "match_gte" then
+			return ctx.matchCount >= (tonumber(condVal) or 5)
+		elseif condType == "prob" then
+			local threshold = math.floor((tonumber(condVal) or 0.1) * 1000)
+			return _UtilLogic:RandomIntegerRange(1, 1000) <= threshold
+		end
+		return true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ExecuteEnemyAttack()
+		self:TickBattleState()
+		
+		if self._T.enemyTurnIndex == nil then self._T.enemyTurnIndex = 0 end
+		self._T.enemyTurnIndex += 1
+		local turnIndex = self._T.enemyTurnIndex
+		
+		-- 이전 턴 소환 플래그 초기화 (이 시점 이후 소환된 몬스터만 이번 턴 공격 제외됨)
+		-- 보스전은 MonsterManager를 초기화하지 않으므로 건너뛴다.
+		if not self._T.isBossMode then
+			self.MonsterManager:ClearNewlySpawned()
+		end
+		
+		-- heal block 감소 (파티 상태라 보스전에도 적용된다 — 예전 보스 분기는 이걸 건너뛰어서
+		-- 보스가 block_heal을 걸면 영영 안 풀렸다)
+		if self._T.battleState ~= nil and self._T.battleState.party.healBlocked > 0 then
+			self._T.battleState.party.healBlocked -= 1
+			log("[BM] healBlocked 감소 → " .. tostring(self._T.battleState.party.healBlocked))
+		end
+		
+		-- 몬스터별 스킬/기본공격 분리.
+		-- 보스전은 몬스터 슬롯이 없으므로 **보스 1마리짜리 합성 info**를 만들어 같은 파이프라인에 태운다.
+		-- 예전에는 보스 분기가 기본 공격만 하고 조기 return해서 `EnemySkillSet`의 일반 트리거
+		-- (`every_n_turns` 등)가 보스전에서 한 번도 돌지 않았다.
+		local monsterAttacks = {}
+		if self._T.isBossMode then
+			if isvalid(self.SeasonBossManager) then
+				local bossId = self.SeasonBossManager:GetActiveBossId()
+				table.insert(monsterAttacks, {
+					monsterId    = bossId,
+					monsterIndex = 1,
+					atk          = self.SeasonBossManager:GetBossAttackDamage(),
+					attackTarget = "all",
+					attackEffect = self.SeasonBossManager:GetAttackEffectRUID(),
+					-- 기본 공격에도 보스 파츠 이펙트·사운드를 붙인다.
+					-- `EnemyEffectSet`의 `<bossId>_basic` 행을 스킬처럼 재생한다(일반 몬스터는 nil).
+					effectSkillId = bossId .. "_basic",
+				})
+			end
+		else
+			monsterAttacks = self.MonsterManager:GetAllMonsterAttacks()
+		end
+		local skillMonsters  = {}
+		local basicMonsters  = {}
+		local skipMids       = {}
+		-- ⚠️ **`passive`는 기본 공격을 대체하지 않는다.**
+		--    다른 카테고리(attack/buff/debuff/summon)는 그 턴의 기본 공격을 **대신** 쓰지만
+		--    패시브는 말 그대로 "공격하면서 같이 걸리는" 효과라 둘 다 나가야 한다.
+		--    (아도라티오의 자가 회복이 발동하는 턴에 공격을 안 하던 것을 2026-09-06에 고쳤다)
+		local passiveMonsters = {}
+		for _, info in ipairs(monsterAttacks) do
+			local skills = {}
+			if isvalid(self.EnemySkillManager) then
+				skills = self.EnemySkillManager:GetSkillsForMonster(info.monsterId, turnIndex)
+			end
+			local activeSkills = {}
+			for _, sk in ipairs(skills) do
+				if (sk.skillCategory or "debuff") == "passive" then
+					table.insert(passiveMonsters, { info = info, skills = { sk } })
+				else
+					table.insert(activeSkills, sk)
+				end
+			end
+			if #activeSkills > 0 then
+				table.insert(skillMonsters, { info = info, skills = activeSkills })
+				skipMids[info.monsterId] = true
+			else
+				-- 패시브만 가진 몬스터는 여기로 와서 **기본 공격을 그대로 한다**
+				table.insert(basicMonsters, info)
+			end
+		end
+		
+		local atkMult   = self._T.battleState ~= nil and self._T.battleState.enemy.atk_mult or 1.0
+		local dmgReduce = self._T.battleState ~= nil and self._T.battleState.party.dmg_reduce_mult or 1.0
+		local allDead   = false
+		
+		local function playEffectOnTargets(targetType, effectRUID)
+			if effectRUID == nil or effectRUID == "" then return end
+			local targetIds = self.PlayerManager:GetTargetHeroIds(targetType)
+			for _, heroId in ipairs(targetIds) do
+				local heroSlot = self.PlayerManager:GetHeroSlot(heroId)
+				if isvalid(heroSlot) then
+					_Effect:PlayEffect(effectRUID, heroSlot, Vector2(0, 0), {PlayOnce = true})
+				end
+			end
+		end
+		
+		local function showHeroDmg(targetType, dmg)
+			local tgts = self.PlayerManager:GetTargetHeroIds(targetType)
+			local each = #tgts > 0 and math.floor(dmg / #tgts) or dmg
+			for _, hid in ipairs(tgts) do
+				self:_ShowDamageAt(each, self.PlayerManager:GetHeroSlot(hid))
+			end
+		end
+		
+		-- 스킬 이펙트 적용 (게임 효과 + 비주얼)
+		local function applySkillEffects(skill, info)
+			local effects    = self.EnemySkillManager:GetSkillEffects(skill.skillId)
+			local targetType = (skill.targetType ~= nil and skill.targetType ~= "") and skill.targetType or "all"
+			local baseDmg    = math.floor(info.atk * atkMult * dmgReduce)
+			local cat        = skill.skillCategory or "debuff"
+			local hitTargetIds = nil   -- 데미지 적용 **전에** 잡아두는 피격 대상 (아래 연출에서 재사용)
+			local leadWaited   = 0     -- 시전 연출 → 임팩트까지 여기서 기다린 시간. 호출부가 총 대기에서 뺀다
+			local casterDone   = false -- 공격 분기는 시전 연출을 자기가 순서대로 처리한다
+		
+			log("[BM] 적 스킬 발동: [" .. tostring(cat) .. "] " .. tostring(skill.skillName) .. " monsterId=" .. tostring(info.monsterId) .. " turn=" .. tostring(turnIndex))
+		
+			if cat == "summon" then return end  -- 소환 순서(첫 번째)에서 직접 처리
+		
+			-- `passive`는 `buff`와 같은 효과 표를 쓴다. 다른 점은 **기본 공격을 대체하지 않는다**는 것뿐이고
+			-- 그 처리는 위의 수집 단계(`passiveMonsters`)에서 이미 갈라 놨다.
+			-- (예전에는 여기서 그냥 `return`해 패시브가 통째로 no-op이었다 — 2026-09-06 수정)
+			if cat == "buff" or cat == "passive" then
+				for _, eff in ipairs(effects) do
+					local et = eff.effectType
+					if et == "heal_self" then
+						-- 시전 몬스터가 **자기 자신만** 최대 체력의 `valueA` 비율만큼 회복한다.
+						-- ⚠️ `monsterId`가 아니라 `monsterIndex`로 넘긴다 — 적 스킬은 개체마다 한 번씩 발동하므로
+						--    id로 넘기면 같은 종이 2마리일 때 각자 2번씩 회복해 배로 붙는다(실측 확인).
+						-- ⚠️ 보스전(`SeasonBossManager`)은 `MonsterManager`를 초기화하지 않아 대상이 없다.
+						--    시즌보스에 회복을 주려면 별도 경로가 필요하다(지금은 쓰는 곳이 없어 경고만).
+						if self._T.isBossMode then
+							log_warning("[BM] 보스전은 heal_self를 지원하지 않는다 — 건너뜀 skillId=" .. tostring(skill.skillId))
+						elseif isvalid(self.MonsterManager) then
+							self.MonsterManager:HealMonsterAt(info.monsterIndex, eff.valueA)
+						end
+					elseif et == "buff_enemy_atk" then
+						self._T.battleState.enemy.atk_mult *= (1.0 + eff.valueA)
+						self._T.battleState.enemy.atk_debuff_turns = math.max(self._T.battleState.enemy.atk_debuff_turns, eff.duration)
+					elseif et == "buff_enemy_dmg_reduce" then
+						self._T.battleState.enemy.incoming_dmg_mult *= (1.0 - eff.valueA)
+						self._T.battleState.enemy.incoming_dmg_turns = math.max(self._T.battleState.enemy.incoming_dmg_turns, eff.duration)
+					end
+				end
+		
+			elseif cat == "debuff" then
+				-- 기본 공격 이펙트(attackEffect)는 디버프 스킬에 사용하지 않음
+				for _, eff in ipairs(effects) do
+					local et = eff.effectType
+					if et == "block_heal" then
+						local dur = math.floor(eff.duration)
+						self._T.battleState.party.healBlocked = math.max(self._T.battleState.party.healBlocked, dur)
+						log("[BM] 회복 봉인 적용: " .. tostring(dur) .. "턴")
+					elseif et == "debuff_party_atk" then
+						self._T.battleState.party.atk_mult *= (1.0 - eff.valueA)
+						self._T.battleState.party.atk_buff_turns = math.max(self._T.battleState.party.atk_buff_turns, eff.duration)
+					elseif et == "debuff_party_dmg_reduce" then
+						self._T.battleState.party.dmg_reduce_mult *= (1.0 + eff.valueA)
+						self._T.battleState.party.reduce_turns = math.max(self._T.battleState.party.reduce_turns, eff.duration)
+					end
+				end
+		
+			elseif cat == "attack" then
+				-- ⚠️ 연출 순서는 **시전자 모션 → (임팩트 시점까지 대기) → 피격·데미지**다.
+				--    예전엔 피격 애니·데미지·데미지 숫자를 먼저 처리하고 시전자 연출을 함수 맨 끝에서 틀어서
+				--    **"보스가 때리기도 전에 영웅이 맞는"** 그림이 됐다.
+				--    일반 몬스터 기본 공격은 `PlayAttackAnimFiltered`가 애니를 끝낸 뒤 때리므로 원래 정상이었고,
+				--    이 보호가 없던 스킬 경로만 어긋나 있었다.
+				local casterSlot = self:GetSkillCasterSlot(info)
+				if isvalid(self.EnemySkillManager) then
+					self.EnemySkillManager:PlayCasterEffects(skill.skillId, casterSlot)
+					casterDone = true
+					leadWaited = self.EnemySkillManager:GetImpactDelay(skill.skillId)
+					if leadWaited > 0 then wait(leadWaited) end
+					if self.IsBattleOver then return leadWaited end
+				end
+		
+				-- ⚠️ 피격 대상은 **데미지 적용 전에** 확정한다.
+				--    `GetTargetHeroIds`는 생존자만 돌려주므로, 데미지 뒤에 다시 부르면
+				--    이 공격에 쓰러진 영웅이 목록에서 빠져 **맞아 죽은 영웅에게 피격 이펙트가 안 뜬다.**
+				hitTargetIds = self.PlayerManager:GetTargetHeroIds(targetType)
+				self.PlayerManager:PlayHitAnimOnTargets(targetType)
+				-- 스킬이 자기 피격 이펙트(`HeroEffectRUID`)를 가지면 기본 공격 이펙트는 생략한다.
+				-- 둘 다 틀면 영웅 위에 두 이펙트가 겹쳐 서로 뭉개진다.
+				-- 없는 스킬만 기본 공격 이펙트로 폴백한다.
+				local hasOwnHeroFx = isvalid(self.EnemySkillManager)
+					and self.EnemySkillManager:HasHeroEffect(skill.skillId)
+				if not hasOwnHeroFx then
+					playEffectOnTargets(targetType, info.attackEffect)
+				end
+				if isvalid(self.EnemySkillManager) then
+					local impactSlots = {}
+					for _, hid in ipairs(hitTargetIds) do
+						local hs = self.PlayerManager:GetHeroSlot(hid)
+						if isvalid(hs) then table.insert(impactSlots, hs) end
+					end
+					self.EnemySkillManager:PlayImpactEffects(skill.skillId, cat, casterSlot, impactSlots, self.BattleRootPanel)
+				end
+				if #effects == 0 then
+					if self.PlayerManager:ApplyDamageToTargetHeroes(targetType, baseDmg) then allDead = true end
+					showHeroDmg(targetType, baseDmg)
+				else
+					for _, eff in ipairs(effects) do
+						local et = eff.effectType
+						if et == "damage_single" or et == "damage_all" or et == "damage_random" then
+							local dmg = math.floor(baseDmg * (eff.valueA ~= 0 and eff.valueA or 1.0))
+							if self.PlayerManager:ApplyDamageToTargetHeroes(targetType, dmg) then allDead = true end
+							showHeroDmg(targetType, dmg)
+						end
+					end
+				end
+			end
+		
+			-- 버프·디버프 연출. 공격 스킬은 위에서 시전→임팩트 순서로 이미 처리했다.
+			if not casterDone and isvalid(self.EnemySkillManager) then
+				self.EnemySkillManager:PlaySkillEffects(skill.skillId, cat, self:GetSkillCasterSlot(info), {}, self.BattleRootPanel)
+			end
+			return leadWaited
+		end
+		
+		local function collectSkillsByCategory(cat)
+			local result = {}
+			for _, entry in ipairs(skillMonsters) do
+				for _, skill in ipairs(entry.skills) do
+					if (skill.skillCategory or "debuff") == cat then
+						table.insert(result, { skill = skill, info = entry.info })
+					end
+				end
+			end
+			return result
+		end
+		
+		-- [실행 순서 1/4] 소환 (이펙트 재생 → duration 대기 → 실제 등장)
+		local summonList = collectSkillsByCategory("summon")
+		if #summonList > 0 then
+			-- Step 1: 소환 이펙트 재생 (게임 효과 없이 비주얼만)
+			for _, e in ipairs(summonList) do
+				local monsterSlot = self:GetSkillCasterSlot(e.info)
+				if isvalid(self.EnemySkillManager) then
+					self.EnemySkillManager:PlaySkillEffects(e.skill.skillId, "summon", monsterSlot, {}, self.BattleRootPanel)
+				end
+			end
+			-- Step 2: 가장 긴 MonsterDuration만큼 대기
+			local maxDur = 0.5
+			for _, e in ipairs(summonList) do
+				if isvalid(self.EnemySkillManager) then
+					local dur = self.EnemySkillManager:GetSkillEffectDuration(e.skill.skillId, 0.5)
+					if dur > maxDur then maxDur = dur end
+				end
+			end
+			wait(maxDur)
+			-- Step 3: 이펙트 종료 후 실제 소환 처리
+			for _, e in ipairs(summonList) do
+				local effects = isvalid(self.EnemySkillManager) and self.EnemySkillManager:GetSkillEffects(e.skill.skillId) or {}
+				for _, eff in ipairs(effects) do
+					if eff.effectType == "summon_minion" and (eff.targetId or "") ~= "" then
+						if self._T.isBossMode then
+							-- 보스전은 MonsterManager를 초기화하지 않아 소환할 슬롯이 없다.
+							-- 조용히 실패하면 원인 추적이 어려우니 경고로 드러낸다.
+							log_warning("[BM] 보스전은 소환을 지원하지 않는다 — 건너뜀 skillId=" .. tostring(e.skill.skillId))
+						else
+							local count = math.max(1, math.floor(eff.valueA))
+							self.MonsterManager:SummonMinions(eff.targetId, count, self.CurrentNodeData)
+						end
+					end
+				end
+			end
+		end
+		
+		-- 스킬 하나의 연출이 끝날 때까지 기다린다. 여러 스킬이 같은 턴에 겹쳐도
+		-- 연출이 순차적으로 보이게 하는 장치 — 동시에 틀면 같은 파츠를 쓰는 스킬끼리 서로 지운다.
+		local function waitForSkillEffect(skillId, alreadyWaited)
+			local dur = 1.0
+			if isvalid(self.EnemySkillManager) then
+				dur = self.EnemySkillManager:GetSkillEffectDuration(skillId, 1.0)
+			end
+			-- 공격 스킬은 임팩트 시점까지를 `applySkillEffects` 안에서 이미 기다렸다.
+			-- 그만큼 빼야 **턴 길이가 늘어나지 않고 임팩트 시점만 뒤로 밀린다.**
+			dur = dur - (alreadyWaited or 0)
+			if dur > 0 then wait(dur) end
+		end
+		
+		-- [실행 순서 0/4] 패시브 — 기본 공격을 대체하지 않으므로 턴 맨 앞에서 조용히 적용만 한다.
+		--                  (자가 회복 등. 이 몬스터는 아래에서 기본 공격도 그대로 한다)
+		for _, e in ipairs(passiveMonsters) do
+			for _, sk in ipairs(e.skills) do
+				local lead = applySkillEffects(sk, e.info)
+				waitForSkillEffect(sk.skillId, lead)
+			end
+		end
+		
+		-- [실행 순서 2/4] 버프 — 하나씩 순차 (예전엔 전체 동시 발동 후 1초만 대기했다)
+		local buffList = collectSkillsByCategory("buff")
+		for _, e in ipairs(buffList) do
+			local lead = applySkillEffects(e.skill, e.info)
+			waitForSkillEffect(e.skill.skillId, lead)
+		end
+		
+		-- [실행 순서 3/4] 디버프 — 동일하게 순차
+		local debuffList = collectSkillsByCategory("debuff")
+		for _, e in ipairs(debuffList) do
+			local lead = applySkillEffects(e.skill, e.info)
+			waitForSkillEffect(e.skill.skillId, lead)
+		end
+		
+		-- [실행 순서 4/4] 공격 스킬 순서대로 → 이펙트 duration 대기 / 기본 공격 처리
+		local attackList = collectSkillsByCategory("attack")
+		for _, e in ipairs(attackList) do
+			local lead = applySkillEffects(e.skill, e.info)
+			waitForSkillEffect(e.skill.skillId, lead)
+		end
+		
+		-- 스킬 공격으로 영웅 전멸 시 조기 종료
+		if allDead then
+			self:OnLose()
+			return
+		end
+		
+		-- 기본 공격 1마리분 처리 (보스·일반 공용)
+		local function runBasicAttack(info)
+			local dmg     = math.floor(info.atk * atkMult * dmgReduce)
+			local targets = self.PlayerManager:GetTargetHeroIds(info.attackTarget)
+			local dmgEach = #targets > 0 and math.floor(dmg / #targets) or dmg
+		
+			-- 시전자 쪽 연출(보스 파츠 이펙트 + 사운드)을 **먼저** 틀고 임팩트 시점까지 기다린다.
+			-- 일반 몬스터는 `effectSkillId`가 없다 — 그쪽은 `PlayAttackAnimFiltered`가 공격 애니를
+			-- 끝낸 **뒤에** 이 함수를 부르므로 여기서 또 기다리면 안 되고, 실제로 기다리지도 않는다.
+			local casterSkillId = info.effectSkillId or ""
+			local casterSlot    = nil
+			if casterSkillId ~= "" and isvalid(self.EnemySkillManager) then
+				casterSlot = self:GetSkillCasterSlot(info)
+				self.EnemySkillManager:PlayCasterEffects(casterSkillId, casterSlot)
+				local lead = self.EnemySkillManager:GetImpactDelay(casterSkillId)
+				if lead > 0 then wait(lead) end
+				if self.IsBattleOver then return end
+			end
+		
+			self.PlayerManager:PlayHitAnimOnTargets(info.attackTarget)
+			playEffectOnTargets(info.attackTarget, info.attackEffect)
+			if casterSkillId ~= "" and isvalid(self.EnemySkillManager) then
+				local heroSlots = {}
+				for _, heroId in ipairs(targets) do
+					local hs = self.PlayerManager:GetHeroSlot(heroId)
+					if isvalid(hs) then table.insert(heroSlots, hs) end
+				end
+				self.EnemySkillManager:PlayImpactEffects(casterSkillId, "attack",
+					casterSlot, heroSlots, self.BattleRootPanel)
+			end
+		
+			if self.PlayerManager:ApplyDamageToTargetHeroes(info.attackTarget, dmg) then
+				allDead = true
+			end
+			for _, heroId in ipairs(targets) do
+				self:_ShowDamageAt(dmgEach, self.PlayerManager:GetHeroSlot(heroId))
+			end
+		end
+		
+		-- 적 턴 종료. 보스는 여기서 고정 턴 제한을 먼저 검사한다.
+		-- turnIndex는 이 메서드 진입 시 이미 1 올라간 값이라 "지금까지 쓴 턴 수"다.
+		local function endEnemyTurn()
+			-- 스테이지 보스층 제한 턴(2026-09-07 사용자 지시). 시즌보스와 달리 넘기면 **패배**다 —
+			-- 누적 딜량 같은 지표가 없어 남길 기록이 없기 때문이다.
+			if (not self._T.isBossMode) and isvalid(self.MonsterManager) and self.MonsterManager:IsBossFloor() then
+				local slimit = self.StageBossTurnLimit or 0
+				self.MonsterManager:UpdateBossFloorTurnText(turnIndex, slimit)
+				if slimit > 0 and turnIndex >= slimit then
+					log("[BM] 스테이지 보스층 제한 턴 소진 — 패배 (" .. tostring(turnIndex) .. "/" .. tostring(slimit) .. ")")
+					_Queue:StopSequence()
+					self:OnLose()
+					return
+				end
+			end
+			if self._T.isBossMode and isvalid(self.SeasonBossManager) then
+				self.SeasonBossManager:UpdateRemainingTurns(turnIndex)
+				local limit = self.SeasonBossManager:GetTurnLimit()
+				if limit > 0 and turnIndex >= limit then
+					self.IsBattleOver = true
+					_Queue:StopSequence()
+					self.SeasonBossManager:OnTurnLimitReached()
+					return
+				end
+				-- 무한 구간 경과 턴 카운트. **`OnEnemyTurnEnd`보다 먼저** 불러야
+				-- 무한 구간에 진입하는 그 턴이 0턴으로 잡힌다.
+				self.SeasonBossManager:NotifyTurnEnd(turnIndex)
+				-- 이번 턴에 페이즈 HP가 소진됐다면 **여기서** 넘긴다(경고 연출 + HP 리필).
+				-- HP가 0이 된 순간 바로 넘기면 그 턴에 남은 영웅 공격이 다음 페이즈를 깎는다.
+				self.SeasonBossManager:OnEnemyTurnEnd()
+			end
+			self.TurnManager:EndEnemyTurn()
+		end
+		
+		if self._T.isBossMode then
+			-- 보스는 공격 애니를 MonsterManager가 아니라 자기 파츠로 처리하므로 곧바로 때린다.
+			-- 공격 스킬을 쓴 턴이면 basicMonsters가 비어 기본 공격은 생략된다.
+			for _, info in ipairs(basicMonsters) do runBasicAttack(info) end
+			if allDead then self:OnLose() else endEnemyTurn() end
+			return
+		end
+		
+		-- 스킬 미사용 몬스터 기본 공격 애니 재생 후 데미지 적용
+		self.MonsterManager:PlayAttackAnimFiltered(skipMids, function()
+			for _, info in ipairs(basicMonsters) do runBasicAttack(info) end
+			if allDead then self:OnLose() else endEnemyTurn() end
+		end)
+	end
+
+	@ExecSpace("ClientOnly")
+	method Entity GetSkillCasterSlot(table info)
+		-- 스킬을 쓴 적의 연출 기준 슬롯. 보스전은 MonsterManager가 비어 있어
+		-- `GetSlotForMonster`가 항상 nil이므로 보스 몸통으로 대체한다.
+		if self._T.isBossMode then
+			local slots = self:GetEnemySlots()
+			if #slots > 0 then return slots[1] end
+			return nil
+		end
+		return self.MonsterManager:GetSlotForMonster(info.monsterIndex or 1)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void LoadVisualConfig()
+		self._T.visualConfig = {}
+		local count = _DataService:GetRowCount("HeroSkillVisualSet")
+		for i = 1, count do
+			local vType       = _DataService:GetCell("HeroSkillVisualSet", i, "VisualType")
+			local flipXRaw         = _DataService:GetCell("HeroSkillVisualSet", i, "HeroFlipX")
+			local projFlipXRaw     = _DataService:GetCell("HeroSkillVisualSet", i, "ProjectileFlipX")
+			local heroRUID         = _DataService:GetCell("HeroSkillVisualSet", i, "HeroEffectRUID")
+			local monsterRUID      = _DataService:GetCell("HeroSkillVisualSet", i, "MonsterEffectRUID")
+			local screenRUID       = _DataService:GetCell("HeroSkillVisualSet", i, "ScreenEffectRUID")
+			local projectileRUID   = _DataService:GetCell("HeroSkillVisualSet", i, "ProjectileEffectRUID")
+			self._T.visualConfig[vType] = {
+				soundRUID            = _DataService:GetCell("HeroSkillVisualSet", i, "SoundRUID"),
+				monsterSoundRUID     = _DataService:GetCell("HeroSkillVisualSet", i, "MonsterSoundRUID"),
+				duration             = 0,
+				screenDuration       = 0,
+				monsterDuration      = 0,
+				screenPlayRate       = tonumber(_DataService:GetCell("HeroSkillVisualSet", i, "ScreenPlayRate")) or 1,
+				monsterPlayRate      = tonumber(_DataService:GetCell("HeroSkillVisualSet", i, "MonsterPlayRate")) or 1,
+				projectileDuration   = tonumber(_DataService:GetCell("HeroSkillVisualSet", i, "ProjectileDuration")) or 0,
+				heroEffectRUID       = heroRUID,
+				monsterEffectRUID    = monsterRUID,
+				screenEffectRUID     = screenRUID,
+				projectileEffectRUID = projectileRUID,
+				effectCategory       = _DataService:GetCell("HeroSkillVisualSet", i, "EffectCategory") or "attack",
+				heroFlipX            = flipXRaw == "true",
+				projectileFlipX      = projFlipXRaw == "true",
+				heroPlayRate         = tonumber(_DataService:GetCell("HeroSkillVisualSet", i, "HeroPlayRate"))     or 1,
+				heroScale            = tonumber(_DataService:GetCell("HeroSkillVisualSet", i, "HeroScale"))        or 1,
+				heroOffsetX          = tonumber(_DataService:GetCell("HeroSkillVisualSet", i, "HeroOffsetX"))      or 0,
+				heroOffsetY          = tonumber(_DataService:GetCell("HeroSkillVisualSet", i, "HeroOffsetY"))      or 0,
+				heroPreserveSprite   = _DataService:GetCell("HeroSkillVisualSet", i, "HeroPreserveSprite")        or "",
+				projectileScale      = tonumber(_DataService:GetCell("HeroSkillVisualSet", i, "ProjectileScale"))  or 1,
+				monsterOffsetX       = tonumber(_DataService:GetCell("HeroSkillVisualSet", i, "MonsterOffsetX"))   or 0,
+				monsterOffsetY       = tonumber(_DataService:GetCell("HeroSkillVisualSet", i, "MonsterOffsetY"))   or 0,
+				monsterScale         = tonumber(_DataService:GetCell("HeroSkillVisualSet", i, "MonsterScale"))     or 1,
+				heroEffectRUID2      = _DataService:GetCell("HeroSkillVisualSet", i, "HeroEffectRUID2")            or "",
+				heroEffectRUID3      = _DataService:GetCell("HeroSkillVisualSet", i, "HeroEffectRUID3")            or "",
+				monsterEffectRUID2   = _DataService:GetCell("HeroSkillVisualSet", i, "MonsterEffectRUID2")         or "",
+				monsterEffectRUID3   = _DataService:GetCell("HeroSkillVisualSet", i, "MonsterEffectRUID3")         or "",
+				screenEffectRUID2    = _DataService:GetCell("HeroSkillVisualSet", i, "ScreenEffectRUID2")          or "",
+				screenEffectRUID3    = _DataService:GetCell("HeroSkillVisualSet", i, "ScreenEffectRUID3")          or "",
+			}
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PreloadPartyEffects()
+		local partyHeroes = self.PlayerManager:GetPartyHeroStats()
+		local seenTypes = {}
+		local ruids = {}
+		
+		local function addRUID(ruid)
+			if ruid ~= nil and ruid ~= "" then
+				table.insert(ruids, ruid)
+			end
+		end
+		
+		for _, hero in ipairs(partyHeroes) do
+			for tier = 0, hero.starLevel - 1 do
+				local skill = _HeroDataManager:GetHeroSkillData(hero.heroId, tier)
+				if skill == nil then continue end
+				local vType = skill.VisualType
+				if vType == nil or vType == "" or seenTypes[vType] then continue end
+				seenTypes[vType] = true
+				local cfg = self._T.visualConfig[vType]
+				if cfg == nil then continue end
+				addRUID(cfg.heroEffectRUID)
+				addRUID(cfg.heroEffectRUID2)
+				addRUID(cfg.heroEffectRUID3)
+				addRUID(cfg.monsterEffectRUID)
+				addRUID(cfg.monsterEffectRUID2)
+				addRUID(cfg.monsterEffectRUID3)
+				addRUID(cfg.screenEffectRUID)
+				addRUID(cfg.screenEffectRUID2)
+				addRUID(cfg.screenEffectRUID3)
+				addRUID(cfg.projectileEffectRUID)
+			end
+		end
+		
+		if #ruids > 0 then
+			_ResourceService:PreloadAsync(ruids, function()
+				for vType, cfg in pairs(self._T.visualConfig) do
+					if not seenTypes[vType] then continue end
+					if cfg.heroEffectRUID ~= nil and cfg.heroEffectRUID ~= "" then
+						local d = _Resource:GetTotalDelay(cfg.heroEffectRUID)
+						if d > 0 then cfg.duration = d end
+					end
+					if cfg.monsterEffectRUID ~= nil and cfg.monsterEffectRUID ~= "" then
+						local d = _Resource:GetTotalDelay(cfg.monsterEffectRUID)
+						if d > 0 then cfg.monsterDuration = d end
+					end
+					if cfg.screenEffectRUID ~= nil and cfg.screenEffectRUID ~= "" then
+						local d = _Resource:GetTotalDelay(cfg.screenEffectRUID)
+						if d > cfg.screenDuration then cfg.screenDuration = d end
+					end
+					if cfg.screenEffectRUID2 ~= nil and cfg.screenEffectRUID2 ~= "" then
+						local d = _Resource:GetTotalDelay(cfg.screenEffectRUID2)
+						if d > cfg.screenDuration then cfg.screenDuration = d end
+					end
+					if cfg.screenEffectRUID3 ~= nil and cfg.screenEffectRUID3 ~= "" then
+						local d = _Resource:GetTotalDelay(cfg.screenEffectRUID3)
+						if d > cfg.screenDuration then cfg.screenDuration = d end
+					end
+				end
+			end)
+		end
+	end
+
+	method void TickBattleState()
+		if self._T.battleState == nil then return end
+		local e = self._T.battleState.enemy
+		local p = self._T.battleState.party
+		
+		if e.atk_debuff_turns > 0 then
+			e.atk_debuff_turns -= 1
+			if e.atk_debuff_turns <= 0 then e.atk_mult = 1.0 end
+		end
+		if e.incoming_dmg_turns > 0 then
+			e.incoming_dmg_turns -= 1
+			if e.incoming_dmg_turns <= 0 then e.incoming_dmg_mult = 1.0 end
+		end
+		if p.atk_buff_turns > 0 then
+			p.atk_buff_turns -= 1
+			if p.atk_buff_turns <= 0 then p.atk_mult = 1.0 end
+		end
+		if p.reduce_turns > 0 then
+			p.reduce_turns -= 1
+			if p.reduce_turns <= 0 then p.dmg_reduce_mult = 1.0 end
+		end
+		if p.hero_self_atk_turns ~= nil then
+			for hId, turns in pairs(p.hero_self_atk_turns) do
+				if turns > 0 then
+					p.hero_self_atk_turns[hId] = turns - 1
+					if p.hero_self_atk_turns[hId] <= 0 then
+						p.hero_self_atk_mult[hId] = 1.0
+					end
+				end
+			end
+		end
+	end
+
+	method void OnWin()
+		-- 승리하면 적 턴이 오지 않으므로 붙잡아 둔 콤보를 여기서도 지운다(2026-09-07).
+		_PuzzleLogic:HideCombo()
+		self:FinishBattle()
+		if not self._T.isBossMode then
+			if self.StageManager:GetCurrentFloor() < 5 then
+				if isvalid(self.NextFloorButton) then
+					self.NextFloorButton.Enable = true
+				end
+			end
+		end
+	end
+
+	method void FinishBattle()
+		if not self._T.isBossMode then
+			self.StageManager:CompleteFloor()
+		end
+	end
+
+	method void OnLose()
+		-- 패배도 전투 종료다. 이걸 안 세우면 `IsBattleOver` 가드를 보는 쪽
+		-- (`ExecutePlayerAttack`·`ApplyPassiveSkills`)이 끝난 전투를 계속 진행 가능한 것으로 본다.
+		self.IsBattleOver = true
+		_PuzzleLogic:HideCombo()
+		if self._T.isBossMode then
+			if isvalid(self.SeasonBossManager) then
+				self.SeasonBossManager:EndBossBattle()
+			end
+		end
+		self:ShowResultEffect(false)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowResultEffect(boolean isWin)
+		if not isvalid(self.ResultEffect) then
+			-- 연출을 못 틀어도 로비로는 보내야 한다(승패 무관).
+			self.UIManager:ShowFadeOutToLobby()
+			return
+		end
+		local spr = self.ResultEffect.SpriteGUIRendererComponent
+		if spr == nil then
+			-- 연출을 못 틀어도 로비로는 보내야 한다(승패 무관).
+			self.UIManager:ShowFadeOutToLobby()
+			return
+		end
+		if self._T.resultHandler ~= nil then
+			self.ResultEffect:DisconnectEvent(SpriteGUIAnimPlayerEndEvent, self._T.resultHandler)
+			self._T.resultHandler = nil
+		end
+		spr.ImageRUID = DataRef(isWin and self.WinEffectRUID or self.LoseEffectRUID)
+		spr.AnimClipPlayType = SpriteAnimClipPlayType.Onetime
+		self.ResultEffect.Enable = true
+		local isWinLocal = isWin
+		self._T.resultHandler = self.ResultEffect:ConnectEvent(SpriteGUIAnimPlayerEndEvent, function(event)
+			self.ResultEffect:DisconnectEvent(SpriteGUIAnimPlayerEndEvent, self._T.resultHandler)
+			self._T.resultHandler = nil
+			self.ResultEffect.Enable = false
+			-- 승리 분기는 `WinResultPanel`이 있을 때만 그 패널을 띄운다. 그런데 이 프로퍼티는
+			-- 비어 있어서(2026-09-06 런타임 확인) **이기면 아무 일도 안 일어나 화면에 갇혔다.**
+			-- 패널이 없으면 패배와 같이 로비로 돌려보낸다 — 어떤 경로로 끝나든 빠져나올 수 있어야 한다.
+			if isWinLocal and isvalid(self.WinResultPanel) then
+				self.WinResultPanel.Enable = true
+			else
+				self.UIManager:ShowFadeOutToLobby()
+			end
+		end)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowStageClearResult()
+		-- 스테이지 클리어: 승리 이펙트 재생 후 FadeOut → 로비 (WinResultPanel 없음)
+		if not isvalid(self.ResultEffect) then
+			self.UIManager:ShowFadeOutToLobby()
+			return
+		end
+		local spr = self.ResultEffect.SpriteGUIRendererComponent
+		if spr == nil then
+			self.UIManager:ShowFadeOutToLobby()
+			return
+		end
+		if self._T.resultHandler ~= nil then
+			self.ResultEffect:DisconnectEvent(SpriteGUIAnimPlayerEndEvent, self._T.resultHandler)
+			self._T.resultHandler = nil
+		end
+		spr.ImageRUID = DataRef(self.WinEffectRUID)
+		spr.AnimClipPlayType = SpriteAnimClipPlayType.Onetime
+		self.ResultEffect.Enable = true
+		self._T.resultHandler = self.ResultEffect:ConnectEvent(SpriteGUIAnimPlayerEndEvent, function(event)
+			self.ResultEffect:DisconnectEvent(SpriteGUIAnimPlayerEndEvent, self._T.resultHandler)
+			self._T.resultHandler = nil
+			self.ResultEffect.Enable = false
+			self.UIManager:ShowFadeOutToLobby()
+		end)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _ShowDamageAt(integer damage, Entity slotEntity)
+		if not isvalid(slotEntity) then return end
+		local slotRC = slotEntity.UITransformComponent
+		if slotRC == nil then return end
+		-- 슬롯의 WorldPosition → BattleRootPanel 로컬 좌표로 변환
+		local worldPos = slotRC.WorldPosition
+		local dmgPos   = Vector2(worldPos.x, worldPos.y + 50)
+		if isvalid(self.BattleRootPanel) then
+			local rootT = self.BattleRootPanel.UITransformComponent
+			if rootT ~= nil then
+				local lp = rootT:ToLocalPoint(worldPos)
+				dmgPos = Vector2(lp.x - 80, lp.y + 50)
+			end
+		end
+		-- 같은 좌표에 여러 번 호출될 때 풀 슬롯 인덱스로 Y를 분산시켜 겹침 방지
+		local pool = { self.DmgNum0, self.DmgNum1, self.DmgNum2, self.DmgNum3, self.DmgNum4 }
+		for i, ent in ipairs(pool) do
+			if isvalid(ent) then
+				local comp = ent.UIDamageNumber
+				if comp ~= nil and comp:IsAvailable() then
+					local stackedPos = Vector2(dmgPos.x, dmgPos.y + (i - 1) * 36)
+					comp:Play(damage, stackedPos)
+					return
+				end
+			end
+		end
+	end
+
+end

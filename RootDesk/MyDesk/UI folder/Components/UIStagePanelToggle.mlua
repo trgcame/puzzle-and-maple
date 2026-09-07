@@ -1,0 +1,36 @@
+@Component
+script UIStagePanelToggle extends Component
+
+	property Entity StagePanel = "5e979920-60d4-4925-a811-a54e3b25abe8"
+
+	property Entity StageText = "e972ef4b-93da-404d-b234-0887fbfb380e"
+
+	property CurrencyManager CurrencyManager = "2eb2fe06-342b-43dd-bcd0-feb6eae3550c"
+
+	method void RefreshText()
+		if not isvalid(self.StageText) then return end
+		local nextStage = 1
+		if isvalid(self.CurrencyManager) then
+			nextStage = self.CurrencyManager:GetMaxClearedStage() + 1
+		end
+		local c = self.StageText.TextGUIRendererComponent
+		if c ~= nil then
+			c.Text = tostring(nextStage)
+		end
+	end
+
+	@EventSender("Self")
+	handler HandleButtonClickEvent(ButtonClickEvent event)
+		--------------- Native Event Sender Info ----------------
+		-- Sender: ButtonComponent
+		-- Space: Client
+		---------------------------------------------------------
+		if not isvalid(self.StagePanel) then return end
+		local opening = not self.StagePanel.Enable
+		self.StagePanel.Enable = opening
+		if opening then
+			self:RefreshText()
+		end
+	end
+
+end

@@ -1,0 +1,72 @@
+{
+  "Id": "",
+  "GameId": "",
+  "EntryKey": "collisiongroupset://unique",
+  "ContentType": "x-mod/collisiongroupset",
+  "Content": "",
+  "Usage": 0,
+  "UsePublish": 1,
+  "UseService": 0,
+  "CoreVersion": "26.3.0.0",
+  "StudioVersion": "0.1.0.0",
+  "DynamicLoading": 0,
+  "ContentProto": {
+    "Use": "Json",
+    "Json": {
+      "Groups": [
+        {
+          "Id": "4bf47230a5c74d62893b11ccbfc4e99c",
+          "Name": "Default"
+        },
+        {
+          "Id": "MOD@TriggerBox",
+          "Name": "TriggerBox"
+        },
+        {
+          "Id": "MOD@HitBox",
+          "Name": "HitBox"
+        },
+        {
+          "Id": "MOD@Interaction",
+          "Name": "Interaction"
+        },
+        {
+          "Id": "MOD@Portal",
+          "Name": "Portal"
+        },
+        {
+          "Id": "MOD@Climbable",
+          "Name": "Climbable"
+        },
+        {
+          "Id": "a64697c9bac64d8e9716f370705c2707",
+          "Name": "Puzzle"
+        }
+      ],
+      "Matrix": {
+        "4bf47230a5c74d62893b11ccbfc4e99c": [],
+        "MOD@TriggerBox": [
+          "4bf47230a5c74d62893b11ccbfc4e99c"
+        ],
+        "MOD@HitBox": [
+          "4bf47230a5c74d62893b11ccbfc4e99c"
+        ],
+        "MOD@Interaction": [
+          "4bf47230a5c74d62893b11ccbfc4e99c",
+          "MOD@Interaction"
+        ],
+        "MOD@Portal": [
+          "4bf47230a5c74d62893b11ccbfc4e99c",
+          "MOD@Portal"
+        ],
+        "MOD@Climbable": [
+          "4bf47230a5c74d62893b11ccbfc4e99c",
+          "MOD@Climbable"
+        ],
+        "a64697c9bac64d8e9716f370705c2707": [
+          "a64697c9bac64d8e9716f370705c2707"
+        ]
+      }
+    }
+  }
+}

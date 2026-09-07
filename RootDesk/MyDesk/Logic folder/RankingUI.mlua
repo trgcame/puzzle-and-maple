@@ -1,0 +1,361 @@
+@Logic
+script RankingUI extends Logic
+
+	property Entity panel = "7829b496-4598-4fc8-aa55-664557092ef8"
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		self._T.handlers = {}
+		self._T.board = "stage"
+		self._T.bound = false
+		self._T.gridReady = false
+		self._T.resetScroll = true
+		-- 진입은 로비 RightAside/Inventory에 붙은 UIRanking 글루가 담당한다
+		-- (로비의 다른 버튼들과 같은 방식). 여기서 또 연결하면 Open이 두 번 돈다.
+		if isvalid(self.panel) then self.panel.Enable = false end
+		log("[RankingUI] 초기화 완료 — 패널 내부 버튼은 첫 Open에서 연결")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _EnsureBound()
+		-- DefaultShow=false 그룹의 자식은 월드 시작 시점에 안 잡힌다. 첫 Open에서 연결한다.
+		if self._T.bound == true then return end
+		local back = self:_Find("BackButton")
+		if not isvalid(back) then return end
+		self:_Bind(back, function() self:Close() end)
+		self:_Bind(self:_Find("TabStage"), function() self:SelectBoard("stage") end)
+		self:_Bind(self:_Find("TabBoss"),  function() self:SelectBoard("boss") end)
+		self._T.bound = true
+		log("[RankingUI] 패널 내부 버튼 연결 완료")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		if self._T.handlers == nil then return end
+		for _, rec in ipairs(self._T.handlers) do
+			if isvalid(rec.entity) then
+				if rec.evt == "scroll" then
+					rec.entity:DisconnectEvent(ScrollPositionChangedEvent, rec.evtHandler)
+				else
+					rec.entity:DisconnectEvent(ButtonClickEvent, rec.evtHandler)
+				end
+			end
+		end
+		self._T.handlers = {}
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _Bind(Entity entity, any callback)
+		if not isvalid(entity) then
+			log_warning("[RankingUI] 버튼 엔티티를 찾을 수 없어 배선을 건너뜁니다.")
+			return
+		end
+		local h = entity:ConnectEvent(ButtonClickEvent, callback)
+		table.insert(self._T.handlers, { entity = entity, evtHandler = h })
+	end
+
+	@ExecSpace("ClientOnly")
+	method any _Find(string path)
+		-- 직계 자식을 먼저 본다. 재귀부터 돌리면 같은 이름의 손자를 먼저 잡는다.
+		if not isvalid(self.panel) then return nil end
+		local node = self.panel
+		for seg in string.gmatch(path, "[^/]+") do
+			local child = node:GetChildByName(seg, false)
+			if not isvalid(child) then child = node:GetChildByName(seg, true) end
+			if not isvalid(child) then return nil end
+			node = child
+		end
+		return node
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _SetText(string path, string value)
+		local e = self:_Find(path)
+		if not isvalid(e) then return end
+		local c = e.TextGUIRendererComponent
+		if c == nil then c = e.TextComponent end   -- 화면에 두 종류가 섞여 있을 수 있다
+		if c ~= nil then c.Text = value end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Open()
+		if not isvalid(self.panel) then return end
+		self.panel.Enable = true
+		self:_EnsureBound()
+		self:SelectBoard(self._T.board or "stage")
+		log("[RankingUI] 랭킹 열기")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Close()
+		if isvalid(self.panel) then self.panel.Enable = false end
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsOpen()
+		return isvalid(self.panel) and self.panel.Enable == true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SelectBoard(string boardId)
+		self._T.board = boardId
+		self._T.resetScroll = true   -- 탭을 바꿨으니 목록을 맨 위로
+		self:_RefreshTabs()
+		-- 캐시가 있으면 즉시 그리고, 서버에는 갱신을 한 번 더 요청한다.
+		self:Render()
+		_RankingManager:Fetch(boardId, self:_TopCount())
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer _TopCount()
+		return 100   -- 스크롤로 100위까지 본다
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _RefreshTabs()
+		-- 선택된 탭만 밝게. 스프라이트를 바꾸지 않고 색만 조절해 화면 파일을 건드리지 않는다.
+		local on = self._T.board or "stage"
+		local pairsList = { { "TabStage", "stage" }, { "TabBoss", "boss" } }
+		for _, t in ipairs(pairsList) do
+			local e = self:_Find(t[1])
+			if isvalid(e) then
+				local c = e.SpriteGUIRendererComponent
+				if c ~= nil then
+					if t[2] == on then c.Color = Color(1, 1, 1, 1)
+					else c.Color = Color(0.55, 0.55, 0.55, 1) end
+				end
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method string _FormatScore(string boardId, integer score)
+		-- 시즌보스는 머리글이 이미 "누적 딜량"이라 숫자만 적는다.
+		if boardId == "boss" then return tostring(score) end
+		return tostring(score) .. " 스테이지"
+	end
+
+	@ExecSpace("ClientOnly")
+	method string _ScoreLabel(string boardId)
+		if boardId == "boss" then return "누적 딜량" end
+		return "도달 스테이지"
+	end
+
+	@ExecSpace("ClientOnly")
+	method string _MedalRUID(integer rank)
+		-- 1~3위는 숫자 대신 메달 이미지를 쓴다. 그 아래는 빈 문자열.
+		if rank == 1 then return "183dd8504eb648e6ac870bc214b2a30f" end
+		if rank == 2 then return "4836d93d5c9c4d3e9d1eda45b80a30e0" end
+		if rank == 3 then return "bdd5be0ba1ef4dcba0617d58112c34af" end
+		return ""
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _EnsureGrid()
+		-- GridView의 ItemEntity/OnRefresh는 화면 파일에 담기지 않는다(런타임 전용).
+		-- 패널이 처음 열릴 때 한 번만 연결한다.
+		if self._T.gridReady == true then return end
+		local gridEnt = self:_Find("ListPanel/Grid")
+		local tmpl    = self:_Find("ListPanel/RowTemplate")
+		if not isvalid(gridEnt) or not isvalid(tmpl) then
+			log_warning("[RankingUI] Grid 또는 RowTemplate을 찾지 못했습니다.")
+			return
+		end
+		local grid = gridEnt.GridViewComponent
+		if grid == nil then
+			log_warning("[RankingUI] Grid에 GridViewComponent가 없습니다.")
+			return
+		end
+		grid.ItemEntity = tmpl
+		grid.OnRefresh = function(index, entity)
+			self:_ApplyRow(index, entity)
+		end
+		self._T.grid = grid
+		self._T.gridEnt = gridEnt
+		self._T.snapGen = 0
+		self._T.snapRow = 0       -- 지금 맨 위에 있는 행 번호(0부터)
+		self._T.snapLock = false
+
+		-- 스크롤이 멈추면 한 칸 단위로 맞춘다. 목록 배경 아트의 가로 구분선이
+		-- 행 간격(60+4)과 같아서, 어중간하게 서면 행이 칸을 물고 어색해진다.
+		local h = gridEnt:ConnectEvent(ScrollPositionChangedEvent, function(event)
+			-- 스냅 직후 남은 관성 이벤트는 무시한다. 안 그러면 한 번 굴린 게
+			-- 두 칸으로 늘어난다.
+			if self._T.snapLock == true then return end
+			self._T.snapGen = (self._T.snapGen or 0) + 1
+			local gen = self._T.snapGen
+			_TimerService:SetTimerOnce(function()
+				if self._T.snapGen ~= gen then return end   -- 아직 스크롤 중
+				self:_SnapScroll()
+			end, 0.1)
+		end)
+		table.insert(self._T.handlers, { entity = gridEnt, evtHandler = h, evt = "scroll" })
+
+		self._T.gridReady = true
+		log("[RankingUI] GridView 연결 완료")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _SnapScroll()
+		-- 현재 스크롤 위치를 px로 환산해 행 간격의 배수로 반올림한다.
+		-- 맨 위 normalized = 0, 아래로 갈수록 1 (실측).
+		local g = self._T.gridEnt
+		local c = self._T.grid
+		if not isvalid(g) or c == nil then return end
+		local n = c.TotalCount or 0
+		if n <= 1 then return end
+
+		local cell  = c.CellSize.y
+		local gap   = c.Spacing.y
+		local pitch = cell + gap
+		if pitch <= 0 then return end
+
+		-- ⚠️ 엔진이 스크롤에 쓰는 뷰포트는 RectSize.y보다 6.7px 작다(실측).
+		-- TotalCount 8과 16에서 똑같이 나온 상수라 개수와 무관한 고정 여유다.
+		-- 이걸 안 빼면 스크롤할수록 행이 칸에서 2~3px씩 밀린다.
+		local content    = n * cell + (n - 1) * gap
+		local viewport   = g.UITransformComponent.RectSize.y - 6.7
+		local scrollable = content - viewport
+		if scrollable <= 0 then return end
+
+		local cur    = c:GetScrollNormalizedPosition(UITransformAxis.Vertical)
+		local rawRow = (cur * scrollable) / pitch
+		local maxRow = math.floor(scrollable / pitch + 0.5)
+
+		-- 가까운 칸으로 반올림하면 휠 한 번이 반 칸도 못 갈 때 제자리로 되돌아온다
+		-- (= 두 번 굴려야 한 칸 내려가는 느낌). 그래서 **움직인 방향으로 최소 한 칸**
+		-- 이동한다. 많이 굴렸으면 그만큼 여러 칸.
+		local from = self._T.snapRow or 0
+		local diff = rawRow - from
+		local row  = from
+		if diff > 0.1 then
+			local step = math.floor(diff + 0.5)
+			if step < 1 then step = 1 end
+			row = from + step
+		elseif diff < -0.1 then
+			local step = math.floor(-diff + 0.5)
+			if step < 1 then step = 1 end
+			row = from - step
+		end
+		if row < 0 then row = 0 end
+		if row > maxRow then row = maxRow end
+		self._T.snapRow = row
+
+		local target = (row * pitch) / scrollable
+		if target > 1 then target = 1 end
+		-- 이미 맞아 있으면 손대지 않는다. 안 그러면 스냅이 다시 이벤트를 불러
+		-- 무한 반복이 된다.
+		if math.abs(target - cur) < 0.0005 then return end
+
+		self._T.snapLock = true
+		c:SetScrollNormalizedPosition(UITransformAxis.Vertical, target)
+		self._T.lockGen = (self._T.lockGen or 0) + 1
+		local lg = self._T.lockGen
+		_TimerService:SetTimerOnce(function()
+			if self._T.lockGen ~= lg then return end
+			self._T.snapLock = false
+		end, 0.12)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _ApplyRow(integer index, Entity entity)
+		-- GridView가 화면에 보이는 행만 재사용하며 부른다. index는 0부터.
+		-- 스크롤 중 자주 불리므로 DataStorage를 건드리지 않고 캐시만 읽는다.
+		if not isvalid(entity) then return end
+		local boardId = self._T.board or "stage"
+		local data = _RankingManager:GetBoard(boardId)
+		local rows = (data ~= nil and data.rows) or {}
+		local r = rows[index + 1]
+		if r == nil then return end
+
+		local rankNo = r.rank or (index + 1)
+		local ruid = self:_MedalRUID(rankNo)
+
+		local medal = entity:GetChildByName("Medal", false)
+		if isvalid(medal) then
+			medal.Enable = (ruid ~= "")
+			if ruid ~= "" and medal.SpriteGUIRendererComponent ~= nil then
+				medal.SpriteGUIRendererComponent.ImageRUID = DataRef(ruid)
+			end
+		end
+
+		local rankTxt = entity:GetChildByName("Rank", false)
+		if isvalid(rankTxt) then
+			rankTxt.Enable = (ruid == "")
+			if ruid == "" and rankTxt.TextGUIRendererComponent ~= nil then
+				rankTxt.TextGUIRendererComponent.Text = tostring(rankNo)
+			end
+		end
+
+		-- 초상화: CostumeManagerComponent.DefaultEquipUserId에 유저 id를 넣으면
+		-- 접속 중이 아닌 유저의 복장도 복제해 온다(엔진 설명 기준).
+		local portrait = entity:GetChildByName("Portrait", false)
+		if isvalid(portrait) then
+			local av = portrait:GetChildByName("Avatar", false)
+			if isvalid(av) and av.CostumeManagerComponent ~= nil then
+				av.CostumeManagerComponent.DefaultEquipUserId = r.key or ""
+			end
+		end
+
+		local name = r.name
+		if name == nil or name == "" then name = "???" end
+		local nameTxt = entity:GetChildByName("Name", false)
+		if isvalid(nameTxt) and nameTxt.TextGUIRendererComponent ~= nil then
+			nameTxt.TextGUIRendererComponent.Text = name
+		end
+
+		local scoreTxt = entity:GetChildByName("Score", false)
+		if isvalid(scoreTxt) and scoreTxt.TextGUIRendererComponent ~= nil then
+			scoreTxt.TextGUIRendererComponent.Text = self:_FormatScore(boardId, r.score)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnBoardReceived(string boardId)
+		-- 지금 보고 있는 탭의 응답만 그린다(탭을 빨리 바꿨을 때 덮어쓰지 않게).
+		if boardId ~= (self._T.board or "stage") then return end
+		if not self:IsOpen() then return end
+		self:Render()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Render()
+		local boardId = self._T.board or "stage"
+		local data = _RankingManager:GetBoard(boardId)
+		local rows = (data ~= nil and data.rows) or {}
+
+		-- 기록 열 머리글은 탭에 따라 달라진다.
+		self:_SetText("ListPanel/HeadScore", self:_ScoreLabel(boardId))
+
+		self:_EnsureGrid()
+		if self._T.grid ~= nil then
+			local reset = (self._T.resetScroll == true)
+			self._T.resetScroll = false
+			self._T.grid.TotalCount = #rows
+			-- 두 번째 인자 force=true라야 이미 만들어진 행도 다시 그린다.
+			self._T.grid:Refresh(reset, true)
+			if reset then
+				-- Refresh(resetPos=true)만으로는 아래로 내려가 있던 목록이
+				-- 맨 위로 돌아오지 않는다(탭 전환 때 실제로 겪음). 직접 되돌린다.
+				self._T.grid:ResetScrollPosition(UITransformAxis.Vertical)
+				self._T.snapRow = 0
+				self._T.snapLock = false
+				self._T.snapGen = (self._T.snapGen or 0) + 1   -- 대기 중인 스냅 무효화
+			end
+		end
+
+		local empty = self:_Find("ListPanel/EmptyNote")
+		if isvalid(empty) then empty.Enable = (#rows == 0) end
+
+		if data == nil then
+			self:_SetText("MyRow/Value", "불러오는 중...")
+		elseif data.myScore == nil or data.myScore <= 0 then
+			self:_SetText("MyRow/Value", "기록 없음")
+		elseif data.myRank == nil or data.myRank <= 0 then
+			self:_SetText("MyRow/Value", "순위권 밖  ·  " .. self:_FormatScore(boardId, data.myScore))
+		else
+			self:_SetText("MyRow/Value", tostring(data.myRank) .. "위  ·  " .. self:_FormatScore(boardId, data.myScore))
+		end
+	end
+
+end

@@ -1,0 +1,498 @@
+@Component
+script PlayerManager extends Component
+
+	property Entity heroSlot1 = "ab3b56ff-2633-48ff-8260-359e81ade8c2"
+
+	property Entity heroSlot2 = "3cf469c2-d841-4281-95bb-4538706b8ddf"
+
+	property Entity heroSlot3 = "d64ac066-2531-4af9-953f-c44178cb6ffd"
+
+	property Entity heroSlot4 = "520f7663-9968-4316-a519-f41e1b8ea3fa"
+
+	property Entity heroSlot5 = "e478a79d-e06b-4b0e-81d8-350c258fa262"
+
+	property Entity HeroInfo = "956d5ed5-eb8e-4007-9faf-7fdc95cf699f"
+
+	method table GetHeroInfoSlots()
+		local slots = {}
+		if not isvalid(self.HeroInfo) then return slots end
+		for i = 1, 5 do
+			local slot = self.HeroInfo:GetChildByName("Hero" .. tostring(i), true)
+			if isvalid(slot) then
+				slots[i] = slot
+			end
+		end
+		return slots
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetupPartyDisplay()
+		local data = _HeroDataManager:GetInventoryData()
+		if data == nil then return end
+		
+		local party    = data.party  or {}
+		local myHeroes = data.heroes or {}
+		self._T.heroHP         = {}
+		self._T.heroMaxHP      = {}
+		self._T.heroShield     = {}
+		self._T.heroShieldMax  = {}
+		if self._T.attackStateReady == nil then
+			self._T.attackStateReady = {}
+		end
+		
+		local slots = {
+			self.heroSlot1, self.heroSlot2, self.heroSlot3,
+			self.heroSlot4, self.heroSlot5,
+		}
+		
+		for _, slot in ipairs(slots) do
+			if isvalid(slot) then slot.Enable = false end
+		end
+		
+		local infoSlots    = self:GetHeroInfoSlots()
+		local heroSetCount = _DataService:GetRowCount("HeroSet")
+		
+		for i = 1, 5 do
+			if isvalid(infoSlots[i]) then infoSlots[i].Enable = false end
+		end
+		
+		for i, heroId in ipairs(party) do
+			local slot = slots[i]
+			if not isvalid(slot) then continue end
+		
+			local base = _HeroDataManager:GetHeroBaseData(heroId)
+			if base == nil then continue end
+		
+			local dupes   = myHeroes[heroId] ~= nil and (tonumber(myHeroes[heroId]) or 0) or 0
+			local starLv  = _HeroDataManager:CalcStarLevel(heroId, dupes)
+			local sfLevel = _HeroDataManager:GetStarforceLevelClient(heroId)
+			local maxHP   = _HeroDataManager:CalcHP(base.BaseHP, starLv, sfLevel)
+		
+			local saved = _HeroDataManager:GetHeroCurrentHP(heroId)
+			self._T.heroHP[heroId]    = saved ~= nil and saved or maxHP
+			self._T.heroMaxHP[heroId] = maxHP
+		
+			-- 기존 슬롯 UI (txtHeroName / HpBar)
+			local txtName = slot:GetChildByName("txtHeroName", true)
+			if isvalid(txtName) then
+				local c = txtName.TextGUIRendererComponent
+				if c ~= nil then c.Text = base.Name end
+			end
+			local hpBar = slot:GetChildByName("HpBar", true)
+			if isvalid(hpBar) then hpBar.Enable = true end
+			slot.Enable = true
+		
+			-- HeroAvatar 자식 엔티티에 영웅 코스튬 적용 + 애니메이션 상태 등록
+			local heroAvatar = slot:GetChildByName("HeroAvatar", true)
+			if isvalid(heroAvatar) then
+				_HeroDataManager:ApplyHeroCostume(heroId, heroAvatar)
+				local state = heroAvatar.StateComponent
+				if state ~= nil then
+					if not self._T.attackStateReady[heroId] then
+						state:AddState("ATTACK", nil)
+						state:AddState("HIT", nil)
+						self._T.attackStateReady[heroId] = true
+					end
+					state:ChangeState("IDLE")
+				end
+			end
+		
+			-- HeroInfo 슬롯 UI (HeroImg / txtClass / Hp / Shield)
+			local infoSlot = infoSlots[i]
+			if not isvalid(infoSlot) then continue end
+		
+			local classMaskRUID = {
+				["전사"]  = "1b0babb8222d4183bb3980e8e4478f38",
+				["마법사"] = "506133fbd1be404f8493d350d023b2e0",
+				["궁수"]  = "03ca8822eb5644eeac504b9181d6ebfe",
+				["도적"]  = "1a0532aa554b4f4da4a5ac12137a40e5",
+				["해적"]  = "863ca7782dfc48a0926629b34f36e3ba",
+			}
+			local heroImgEnt = infoSlot:GetChildByName("HeroImg", true)
+			local maskEnt    = infoSlot:GetChildByName("Mask", true)
+			for r = 1, heroSetCount do
+				if _DataService:GetCell("HeroSet", r, "HeroId") == heroId then
+					if isvalid(heroImgEnt) then
+						local spr = heroImgEnt.SpriteGUIRendererComponent
+						if spr ~= nil then
+							spr.ImageRUID = _DataService:GetCell("HeroSet", r, "HeroInfoRUID")
+						end
+					end
+					local class = _DataService:GetCell("HeroSet", r, "Class") or ""
+					if isvalid(maskEnt) then
+						local maskSpr = maskEnt.SpriteGUIRendererComponent
+						if maskSpr ~= nil and classMaskRUID[class] ~= nil then
+							maskSpr.ImageRUID = classMaskRUID[class]
+						end
+					end
+					break
+				end
+			end
+		
+			-- 주/부속성 퍼즐. 무기타입이 곧 퍼즐 원소다(HeroSet.WeaponType / SecondaryWeaponType).
+			self:_SetSlotPuzzle(infoSlot, "mainpuzzle", base.WeaponType or "")
+			self:_SetSlotPuzzle(infoSlot, "subpuzzle",  base.SecondaryWeaponType or "")
+
+			local txtClassEnt = infoSlot:GetChildByName("txtClass", true)
+			if isvalid(txtClassEnt) then
+				-- 이 엔티티는 TextGUIRendererComponent가 아니라 **TextComponent**를 쓴다
+				-- (Hp/Shield의 text_value와 같은 계열). 둘 다 보고 있는 쪽에 넣는다 —
+				-- 한쪽만 보면 nil이라 조용히 건너뛰어 이름이 영영 안 바뀐다.
+				local c = txtClassEnt.TextGUIRendererComponent
+				if c == nil then c = txtClassEnt.TextComponent end
+				if c ~= nil then c.Text = base.Name
+				else log_warning("[PM] txtClass에 텍스트 컴포넌트가 없습니다") end
+			end
+		
+			infoSlot.Enable = true
+		end
+		
+		self:RefreshHeroHPBars()
+	end
+
+	@ExecSpace("ClientOnly")
+	method string _PuzzleRUID(string elementType)
+		-- 무기타입(=퍼즐 원소) -> 퍼즐 스프라이트. PuzzleSet 6행을 한 번만 읽어 캐시한다.
+		if self._T.puzzleRuid == nil then
+			self._T.puzzleRuid = {}
+			local n = _DataService:GetRowCount("PuzzleSet")
+			for i = 1, n do
+				local et = _DataService:GetCell("PuzzleSet", i, "ElementType")
+				self._T.puzzleRuid[et] = _DataService:GetCell("PuzzleSet", i, "SpriteRUID")
+			end
+		end
+		return self._T.puzzleRuid[elementType] or ""
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _SetSlotPuzzle(any slot, string name, string elementType)
+		-- 원소가 없으면 숨긴다(부속성이 비어 있는 영웅 대비).
+		if not isvalid(slot) then return end
+		local e = slot:GetChildByName(name, true)
+		if not isvalid(e) then return end
+		local ruid = self:_PuzzleRUID(elementType)
+		e.Enable = (ruid ~= "")
+		local c = e.SpriteGUIRendererComponent
+		if c ~= nil and ruid ~= "" then c.ImageRUID = ruid end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshHeroHPBars()
+		if self._T.heroHP == nil then return end
+		local data = _HeroDataManager:GetInventoryData()
+		if data == nil then return end
+		local party = data.party or {}
+		local slots = {
+			self.heroSlot1, self.heroSlot2, self.heroSlot3,
+			self.heroSlot4, self.heroSlot5,
+		}
+		
+		for i, heroId in ipairs(party) do
+			local slot = slots[i]
+			if not isvalid(slot) then continue end
+		
+			local cur = self._T.heroHP[heroId] or 0
+			local max = self._T.heroMaxHP[heroId] or 1
+			local ratio = max > 0 and (cur / max) or 0
+		
+			local hpBar = slot:GetChildByName("HpBar", true)
+			if isvalid(hpBar) then
+				local slider = hpBar.SliderComponent
+				if slider ~= nil then slider.Value = ratio end
+			end
+		end
+		
+		self:RefreshHeroInfoUI()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshHeroInfoUI()
+		if self._T.heroHP == nil then return end
+		local data = _HeroDataManager:GetInventoryData()
+		if data == nil then return end
+		local party     = data.party or {}
+		local infoSlots = self:GetHeroInfoSlots()
+		for i, heroId in ipairs(party) do
+			local shield    = self._T.heroShield    ~= nil and (self._T.heroShield[heroId]    or 0) or 0
+			local shieldMax = self._T.heroShieldMax ~= nil and (self._T.heroShieldMax[heroId] or 0) or 0
+			local shieldRatio = shieldMax > 0 and (shield / shieldMax) or 0
+			local infoSlot = infoSlots[i]
+			if not isvalid(infoSlot) then
+				log("[PM] RefreshHeroInfoUI: infoSlots[" .. tostring(i) .. "] invalid")
+				continue
+			end
+		
+			local cur = self._T.heroHP[heroId] or 0
+			local max = self._T.heroMaxHP[heroId] or 1
+			local hpRatio = max > 0 and (cur / max) or 0
+		
+			-- Hp > img_bar / text_value
+			local hpEnt = infoSlot:GetChildByName("Hp", true)
+			if not isvalid(hpEnt) then
+				log("[PM] RefreshHeroInfoUI: 'Hp' child not found in " .. infoSlot.Name)
+			else
+				local imgBar = hpEnt:GetChildByName("img_bar", true)
+				if isvalid(imgBar) then
+					local slider = imgBar.SliderComponent
+					if slider ~= nil then slider.Value = hpRatio end
+				end
+				local txtVal = hpEnt:GetChildByName("text_value", true)
+				if not isvalid(txtVal) then
+					log("[PM] RefreshHeroInfoUI: 'text_value' child not found under Hp")
+				else
+					local c = txtVal.TextComponent
+					if c ~= nil then
+						c.Text = tostring(math.floor(cur)) .. " / " .. tostring(math.floor(max))
+					else
+						log("[PM] RefreshHeroInfoUI: TextComponent nil on text_value(Hp)")
+					end
+				end
+			end
+		
+			-- Shield > img_bar / text_value
+			local shieldEnt = infoSlot:GetChildByName("Shield", true)
+			if not isvalid(shieldEnt) then
+				log("[PM] RefreshHeroInfoUI: 'Shield' child not found in " .. infoSlot.Name)
+			else
+				local imgBar = shieldEnt:GetChildByName("img_bar", true)
+				if isvalid(imgBar) then
+					local slider = imgBar.SliderComponent
+					if slider ~= nil then slider.Value = shieldRatio end
+				end
+				local txtVal = shieldEnt:GetChildByName("text_value", true)
+				if not isvalid(txtVal) then
+					log("[PM] RefreshHeroInfoUI: 'text_value' child not found under Shield")
+				else
+					local c = txtVal.TextComponent
+					if c ~= nil then
+						c.Text = tostring(math.floor(shield)) .. " / " .. tostring(math.floor(shieldMax))
+					else
+						log("[PM] RefreshHeroInfoUI: TextComponent nil on text_value(Shield)")
+					end
+				end
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean ApplyDamageToHeroes(integer totalDamage)
+		if self._T.heroHP == nil then return false end
+		local data = _HeroDataManager:GetInventoryData()
+		if data == nil then return false end
+		local party = data.party or {}
+		if #party == 0 then return false end
+		
+		local dmgEach = math.floor(totalDamage / #party)
+		local allDead = true
+		for _, heroId in ipairs(party) do
+			local dmgToHero = dmgEach
+			local heroShield = self._T.heroShield ~= nil and (self._T.heroShield[heroId] or 0) or 0
+			if heroShield > 0 then
+				local absorbed = math.min(heroShield, dmgToHero)
+				dmgToHero -= absorbed
+				self._T.heroShield[heroId] = heroShield - absorbed
+			end
+			local cur = math.max(0, (self._T.heroHP[heroId] or 0) - dmgToHero)
+			self._T.heroHP[heroId] = cur
+			_HeroDataManager:SetHeroCurrentHP(heroId, cur)
+			if cur > 0 then allDead = false end
+		end
+		self:RefreshHeroHPBars()
+		return allDead
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyHealToHeroes(integer amount, string healType)
+		if self._T.heroHP == nil then log("[PM] heroHP is nil, skip") return end
+		local data = _HeroDataManager:GetInventoryData()
+		if data == nil then log("[PM] inventoryData is nil, skip") return end
+		local party = data.party or {}
+		if #party == 0 then log("[PM] party empty, skip") return end
+		
+		if healType == "HealOne" then
+			local targetId = nil
+			local lowestRatio = 2.0
+			for _, heroId in ipairs(party) do
+				local ratio = (self._T.heroHP[heroId] or 0) / math.max(1, self._T.heroMaxHP[heroId] or 1)
+				if ratio < lowestRatio then
+					lowestRatio = ratio
+					targetId = heroId
+				end
+			end
+			if targetId ~= nil then
+				local max = self._T.heroMaxHP[targetId] or 1
+				local before = self._T.heroHP[targetId] or 0
+				local healed = math.min(max, before + amount)
+				self._T.heroHP[targetId] = healed
+				_HeroDataManager:SetHeroCurrentHP(targetId, healed)
+			end
+		else
+			local healEach = math.floor(amount / #party)
+			for _, heroId in ipairs(party) do
+				local max = self._T.heroMaxHP[heroId] or 1
+				local healed = math.min(max, (self._T.heroHP[heroId] or 0) + healEach)
+				self._T.heroHP[heroId] = healed
+				_HeroDataManager:SetHeroCurrentHP(heroId, healed)
+			end
+		end
+		self:RefreshHeroHPBars()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void GiveShieldToHero(string heroId, integer amount)
+		-- 🔴 **쉴드 최대치 = 영웅의 최대 체력**이다(2026-09-07 사용자 지시).
+		--    예전에는 `shieldMax += amount`라 **받은 양이 곧 최대치**였다. 그래서 쉴드를 받을 때마다
+		--    게이지가 항상 가득 찬 상태로 리셋돼, 얼마나 닳았는지·얼마나 두꺼운지 알 수 없었다.
+		if self._T.heroShield    == nil then self._T.heroShield    = {} end
+		if self._T.heroShieldMax == nil then self._T.heroShieldMax = {} end
+
+		local cur = (self._T.heroShield[heroId] or 0) + amount
+		local cap = self._T.heroMaxHP ~= nil and (self._T.heroMaxHP[heroId] or 0) or 0
+		if cap <= 0 then
+			-- 최대 체력을 아직 모르는 예외 상황(파티 초기화 전). 상한을 못 잡으므로 옛 방식으로 둔다.
+			cap = math.max(cur, self._T.heroShieldMax[heroId] or 0)
+		end
+		self._T.heroShieldMax[heroId] = cap
+		self._T.heroShield[heroId]    = math.min(cur, cap)
+		self:RefreshHeroHPBars()
+	end
+
+	@ExecSpace("ClientOnly")
+	method table GetAliveHeroIds()
+		if self._T.heroHP == nil then return {} end
+		local data = _HeroDataManager:GetInventoryData()
+		if data == nil then return {} end
+		local result = {}
+		for _, heroId in ipairs(data.party or {}) do
+			if (self._T.heroHP[heroId] or 0) > 0 then
+				table.insert(result, heroId)
+			end
+		end
+		return result
+	end
+
+	@ExecSpace("ClientOnly")
+	method table GetTargetHeroIds(string targetType)
+		local alive = self:GetAliveHeroIds()
+		if #alive == 0 then return {} end
+		if targetType == "front" then
+			return { alive[1] }
+		elseif targetType == "back" then
+			return { alive[#alive] }
+		elseif targetType == "all" then
+			return alive
+		elseif targetType == "random" then
+			local idx = _UtilLogic:RandomIntegerRange(1, #alive)
+			return { alive[idx] }
+		end
+		return { alive[1] }
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean ApplyDamageToTargetHeroes(string targetType, integer damage)
+		if self._T.heroHP == nil then return false end
+		local targets = self:GetTargetHeroIds(targetType)
+		if #targets == 0 then return false end
+		local dmgEach = math.floor(damage / #targets)
+		local allDead = true
+		for _, heroId in ipairs(targets) do
+			local heroShield = self._T.heroShield ~= nil and (self._T.heroShield[heroId] or 0) or 0
+			local dmgToHero = dmgEach
+			if heroShield > 0 then
+				local absorbed = math.min(heroShield, dmgToHero)
+				dmgToHero -= absorbed
+				self._T.heroShield[heroId] = heroShield - absorbed
+			end
+			local cur = math.max(0, (self._T.heroHP[heroId] or 0) - dmgToHero)
+			self._T.heroHP[heroId] = cur
+			_HeroDataManager:SetHeroCurrentHP(heroId, cur)
+			if cur > 0 then allDead = false end
+		end
+		-- 살아있는 전체 파티 기준으로 allDead 재확인
+		for _, heroId in ipairs(self:GetAliveHeroIds()) do
+			allDead = false
+			break
+		end
+		self:RefreshHeroHPBars()
+		return allDead
+	end
+
+	@ExecSpace("ClientOnly")
+	method Entity GetHeroSlot(string heroId)
+		local data = _HeroDataManager:GetInventoryData()
+		if data == nil then return nil end
+		local party = data.party or {}
+		local slots = {
+			self.heroSlot1, self.heroSlot2, self.heroSlot3,
+			self.heroSlot4, self.heroSlot5,
+		}
+		for i, id in ipairs(party) do
+			if id == heroId then return slots[i] end
+		end
+		return nil
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayHitAnimOnTargets(string targetType)
+		local targets = self:GetTargetHeroIds(targetType)
+		if #targets == 0 then return end
+		local data = _HeroDataManager:GetInventoryData()
+		if data == nil then return end
+		local party = data.party or {}
+		local slots = {
+			self.heroSlot1, self.heroSlot2, self.heroSlot3,
+			self.heroSlot4, self.heroSlot5,
+		}
+		for _, heroId in ipairs(targets) do
+			for i, id in ipairs(party) do
+				if id == heroId and isvalid(slots[i]) then
+					local heroAvatar = slots[i]:GetChildByName("HeroAvatar", true)
+					if isvalid(heroAvatar) then
+						local state = heroAvatar.StateComponent
+						if state ~= nil then
+							state:ChangeState("HIT")
+							local capturedState = state
+							_TimerService:SetTimerOnce(function()
+								if isvalid(capturedState) then
+									capturedState:ChangeState("IDLE")
+								end
+							end, 0.5)
+						end
+					end
+				end
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method table GetPartyHeroStats()
+		local result = {}
+		local data = _HeroDataManager:GetInventoryData()
+		if data == nil then return result end
+		
+		local party    = data.party  or {}
+		local myHeroes = data.heroes or {}
+		
+		for _, heroId in ipairs(party) do
+			local base = _HeroDataManager:GetHeroBaseData(heroId)
+			if base == nil then continue end
+			local dupes      = myHeroes[heroId] ~= nil and (tonumber(myHeroes[heroId]) or 0) or 0
+			local starLv     = _HeroDataManager:CalcStarLevel(heroId, dupes)
+			-- ⚠️ 스타포스가 곱연산이 되면서 `CalcATK`가 스타포스까지 포함한 **최종값**을 돌려준다.
+			--    예전처럼 `atk + starforceAtk`로 더하면 **이중 계산**이 된다.
+			local sfLevel    = _HeroDataManager:GetStarforceLevelClient(heroId)
+			local atk        = _HeroDataManager:CalcATK(base.BaseATK, starLv, sfLevel)
+			table.insert(result, {
+				heroId               = heroId,
+				weaponType           = base.WeaponType or "",
+				secondaryWeaponType  = base.SecondaryWeaponType or "",
+				atk                  = atk,
+				starLevel            = starLv,
+				starforceLevel       = sfLevel,
+			})
+		end
+		return result
+	end
+
+end
+

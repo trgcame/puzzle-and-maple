@@ -1,0 +1,37 @@
+{
+  "Id": "",
+  "GameId": "",
+  "EntryKey": "material://90b26436-31e5-49b0-8ce8-5999e68a90ac",
+  "ContentType": "x-mod/material",
+  "Content": "",
+  "Usage": 0,
+  "UsePublish": 1,
+  "UseService": 0,
+  "CoreVersion": "26.5.0.0",
+  "StudioVersion": "0.1.0.0",
+  "DynamicLoading": 0,
+  "ContentProto": {
+    "Use": "Json",
+    "Json": {
+      "name": "Highlight",
+      "id": "90b26436-31e5-49b0-8ce8-5999e68a90ac",
+      "shadertype": "LimLight",
+      "Glow": 0.5,
+      "LightColor": {
+        "r": 0.261725217,
+        "g": 0.0397958755,
+        "b": 0.5191636,
+        "a": 1.0
+      },
+      "LitMode": 0,
+      "Location": 0.0,
+      "MinAlpha": 0.0,
+      "Rotate": 105.0,
+      "TimeOffset": 3.0,
+      "TimeScale": 0.2,
+      "Width": 2.0,
+      "IsUIMaterial": false,
+      "RequiresUIStencilStateChange": false
+    }
+  }
+}

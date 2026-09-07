@@ -1,0 +1,53 @@
+{
+  "Id": "",
+  "GameId": "",
+  "EntryKey": "material://d3be6951-7e84-4e30-85e8-c848976e97f5",
+  "ContentType": "x-mod/material",
+  "Content": "",
+  "Usage": 0,
+  "UsePublish": 1,
+  "UseService": 0,
+  "CoreVersion": "26.5.0.0",
+  "StudioVersion": "0.1.0.0",
+  "DynamicLoading": 0,
+  "ContentProto": {
+    "Use": "Json",
+    "Json": {
+      "name": "BlueGradation",
+      "id": "d3be6951-7e84-4e30-85e8-c848976e97f5",
+      "shadertype": "VertexGradient",
+      "Blend": 1.0,
+      "BottomLeftColor": {
+        "r": 0.0579414368,
+        "g": 0.380904853,
+        "b": 0.486328125,
+        "a": 1.0
+      },
+      "BottomRightColor": {
+        "r": 0.0,
+        "g": 0.7529412,
+        "b": 1.0,
+        "a": 1.0
+      },
+      "BoundaryPos": {
+        "x": 0.5,
+        "y": 0.5
+      },
+      "LitMode": 0,
+      "TopLeftColor": {
+        "r": 0.0,
+        "g": 0.7529412,
+        "b": 1.0,
+        "a": 1.0
+      },
+      "TopRightColor": {
+        "r": 0.7546501,
+        "g": 0.7937959,
+        "b": 0.8066406,
+        "a": 1.0
+      },
+      "IsUIMaterial": false,
+      "RequiresUIStencilStateChange": false
+    }
+  }
+}

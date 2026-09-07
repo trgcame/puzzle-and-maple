@@ -1,0 +1,592 @@
+@Logic
+script EnhanceUI extends Logic
+
+	property Entity panel = "d050a2ea-cded-4f46-b8df-9880bf4759fe"
+
+	property Entity btnOpen = "73d47aa7-a862-453e-a60c-3940916bde3e"
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- 강화 패널은 닫힌 상태로 시작한다. 버튼은 여기서 한 번만 연결하고 OnEndPlay에서 해제한다.
+		self._T.handlers = {}
+		self._T.useProtect = false
+		self._T.targetIndex = 1
+		if isvalid(self.panel) then self.panel.Enable = false end
+
+		-- 로비 진입 버튼은 그룹 밖(Lobby)이라 지금 바로 연결된다.
+		self._T.bound = false
+		self:_Bind(self.btnOpen, function() self:Open() end)
+		log("[EnhanceUI] 초기화 완료 — 패널 내부 버튼은 첫 Open에서 연결")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _EnsureBound()
+		-- 패널 내부 버튼은 여기서 한 번만 연결한다.
+		-- 이 그룹은 DefaultShow=false라 월드 시작 시점에는 자식 엔티티가 아직 잡히지 않는다
+		-- (OnBeginPlay에서 연결하면 8개 전부 nil이 된다). 그룹을 켠 뒤에 연결해야 한다.
+		if self._T.bound == true then return end
+		local back = self:_Find("BackButton")
+		if not isvalid(back) then return end   -- 아직 준비 전 — 다음 Open에서 다시 시도
+		self:_Bind(back, function() self:Close() end)
+		self:_Bind(self:_Find("EnhanceButton"), function() self:OnClickEnhance() end)
+		self:_Bind(self:_Find("ProtectToggle"), function() self:ToggleProtect() end)
+		self:_Bind(self:_Find("TargetPanel/ChangeTarget"), function() self:NextTarget() end)
+		-- 슬롯의 "선택 안 됨" 배경은 화면 파일에 있는 값을 그대로 쓴다.
+		-- 여기서 한 번 읽어두면 Maker에서 RUID를 바꿔도 코드를 고칠 필요가 없다.
+		-- (Refresh가 RUID를 덮어쓰기 전에 캐시해야 해서 바인딩과 같은 자리에서 읽는다.)
+		self._T.slotBaseRUID = {}
+		for i = 1, 5 do
+			local idx = i   -- 클로저에 인덱스를 고정한다
+			local slot = self:_Find("TargetPanel/Slot" .. tostring(i))
+			self:_Bind(slot, function() self:SelectSlot(idx) end)
+			if isvalid(slot) then
+				local sc = slot.SpriteGUIRendererComponent
+				if sc ~= nil then self._T.slotBaseRUID[i] = sc.ImageRUID end
+			end
+		end
+		self._T.bound = true
+		log("[EnhanceUI] 패널 내부 버튼 연결 완료")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		if self._T.handlers == nil then return end
+		for _, rec in ipairs(self._T.handlers) do
+			if isvalid(rec.entity) then
+				rec.entity:DisconnectEvent(ButtonClickEvent, rec.evtHandler)
+			end
+		end
+		self._T.handlers = {}
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _Bind(Entity entity, any callback)
+		if not isvalid(entity) then
+			log_warning("[EnhanceUI] 버튼 엔티티를 찾을 수 없어 배선을 건너뜁니다.")
+			return
+		end
+		local h = entity:ConnectEvent(ButtonClickEvent, callback)
+		table.insert(self._T.handlers, { entity = entity, evtHandler = h })
+	end
+
+	@ExecSpace("ClientOnly")
+	method any _Find(string path)
+		-- 자식 조회 헬퍼. UUID를 50개 주입하는 대신 경로로 찾는다.
+		-- GetChildByName은 경로("A/B")를 못 받고, 이름만 주면 재귀 검색이 엉뚱한 동명 엔티티를 잡는다
+		-- (예: "Label"이 Title/Label과 NameBox/Label 둘 다 존재). 그래서 구간을 잘라 단계별로 내려간다.
+		-- string.find는 (시작, 끝) 두 값을 반환해 한 변수에 받으면 LWA-1111이 뜬다. gmatch로 자른다.
+		if not isvalid(self.panel) then return nil end
+		local node = self.panel
+		for seg in string.gmatch(path, "[^/]+") do
+			-- 직계 자식을 먼저 본다. 재귀부터 돌리면 같은 이름의 손자를 먼저 잡는다
+			-- (예: "TargetPanel/Icon"의 Icon vs Slot1~5의 Icon).
+			local child = node:GetChildByName(seg, false)
+			if not isvalid(child) then child = node:GetChildByName(seg, true) end
+			if not isvalid(child) then return nil end
+			node = child
+		end
+		return node
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _SetText(string name, string value)
+		local e = self:_Find(name)
+		if not isvalid(e) then return end
+		local c = e.TextGUIRendererComponent
+		if c ~= nil then c.Text = value end
+	end
+
+	@ExecSpace("ClientOnly")
+	method string _Pct(number v)
+		-- 메이플 확률표에 67.9 같은 소수가 있어 %.1f로 찍되, 정수면 ".0"을 떼서 "30%"로 보이게 한다.
+		-- 100 - 30 - 67.9 - 2.1 이 -1.4e-14로 떨어져 "-0.0%"로 찍히는 것을 막는다.
+		if v < 0.05 and v > -0.05 then v = 0 end
+		local t = string.format("%.1f", v)
+		if string.sub(t, -2) == ".0" then t = string.sub(t, 1, string.len(t) - 2) end
+		return t .. "%"
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _SetEnhanceEnabled(boolean on, string warning)
+		-- 누를 수 없는 상태면 버튼을 회색으로 죽이고, 이유를 중앙에 적는다.
+		-- Refresh에서만 부르므로 대상·단계·재화가 바뀔 때마다 자동으로 다시 평가된다.
+		local btn = self:_Find("EnhanceButton")
+		if isvalid(btn) then
+			local bc = btn.ButtonComponent
+			if bc ~= nil then bc.Enable = on end
+			local sc = btn.SpriteGUIRendererComponent
+			if sc ~= nil then
+				if on then sc.Color = Color(1, 1, 1, 1)
+				else sc.Color = Color(0.45, 0.45, 0.45, 1) end
+			end
+		end
+		self:_SetText("CenterPanel/CostWarning", warning)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _SetImageRUID(string key, any renderer, string ruid)
+		-- 값이 그대로면 건너뛴다. animationclip을 재대입하면 재생이 처음으로 돌아가기 때문이다
+		-- (결과 이펙트처럼 일부러 다시 재생시키고 싶은 곳은 _ShowResult에서 직접 대입한다).
+		if self._T.lastRuid == nil then self._T.lastRuid = {} end
+		if self._T.lastRuid[key] == ruid then return end
+		renderer.ImageRUID = ruid
+		self._T.lastRuid[key] = ruid
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _SetThumbnail(string path, string heroId, number scale)
+		-- 전신 아트(ThumnailRUID). 로비 Center/HeroThumnail과 같은 방식으로 그린다:
+		-- NativeSize + LocalScale 축소 + CSV의 LocalX/LocalY 보정. RectSize로 늘리면 찌그러진다.
+		local e = self:_Find(path)
+		if not isvalid(e) then return end
+		local c = e.SpriteGUIRendererComponent
+		if c == nil then return end
+		local base = heroId ~= nil and _HeroDataManager:GetHeroBaseData(heroId) or nil
+		if base == nil then
+			e.Enable = false
+			return
+		end
+		e.Enable = true
+		-- ThumnailRUID는 animationclip이다. 같은 값을 다시 넣으면 애니메이션이 처음부터 재생되므로,
+		-- 실제로 달라졌을 때만 대입한다(Refresh는 강화할 때마다 불린다).
+		self:_SetImageRUID(path, c, base.ThumnailRUID or "")
+		c.PreserveSprite = PreserveSpriteType.NativeSize
+		c.LocalScale = Vector2(scale, scale)
+		local k = scale / 0.6
+		c.LocalPosition = Vector2((base.LocalX or 0) * k, (base.LocalY or 0) * k)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _SetPortrait(string path, string heroId)
+		-- 상반신 초상(PortraitRUID). 전신 아트와 달리 엔티티의 RectSize에 맞춰 그린다.
+		local e = self:_Find(path)
+		if not isvalid(e) then return end
+		local c = e.SpriteGUIRendererComponent
+		if c == nil then return end
+		local base = heroId ~= nil and _HeroDataManager:GetHeroBaseData(heroId) or nil
+		if base == nil then
+			e.Enable = false
+			return
+		end
+		e.Enable = true
+		self:_SetImageRUID(path, c, base.PortraitRUID or "")
+		c.PreserveSprite = PreserveSpriteType.None
+		c.LocalScale = Vector2(1, 1)
+		c.LocalPosition = Vector2(0, 0)
+	end
+
+	@ExecSpace("ClientOnly")
+	method table _Targets()
+		-- 강화 대상 = **보유 영웅 전체**. 파티 5인으로 제한하면 6번째 영웅부터는
+		-- 강화할 방법이 아예 없다. 순서는 HeroSet.csv 행 순서를 따른다(인벤토리와 동일).
+		-- heroes[heroId]는 중복 카운터라 첫 획득이 0이다 — nil인지로 보유를 판정해야 한다.
+		local data = _HeroDataManager:GetInventoryData()
+		local owned = (data ~= nil and data.heroes) or {}
+		local list = {}
+		local count = _DataService:GetRowCount("HeroSet")
+		for i = 1, count do
+			local heroId = _DataService:GetCell("HeroSet", i, "HeroId")
+			if owned[heroId] ~= nil then
+				table.insert(list, heroId)
+			end
+		end
+		return list
+	end
+
+	@ExecSpace("ClientOnly")
+	method string _TargetHeroId()
+		local list = self:_Targets()
+		return list[self._T.targetIndex or 1] or ""
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer _PageStart()
+		-- 슬롯 5칸은 전체 목록을 5개씩 끊어 보여주는 창이다. 선택된 대상이 포함된 페이지를 연다.
+		local idx = self._T.targetIndex or 1
+		return math.floor((idx - 1) / 5) * 5
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Open()
+		if not isvalid(self.panel) then return end
+		-- 최신 보유/파티/스타포스 값을 받아온다. 응답이 오면 RefreshDisplay 경로로 갱신된다.
+		_HeroDataManager:RequestInventoryData()
+		local list = self:_Targets()
+		if #list == 0 then
+			_UIToast:ShowMessage("보유한 영웅이 없습니다.")
+			return
+		end
+		if self._T.targetIndex == nil or list[self._T.targetIndex] == nil then
+			self._T.targetIndex = 1
+		end
+		self.panel.Enable = true
+		self:_EnsureBound()   -- 그룹을 켠 뒤여야 자식 버튼이 잡힌다
+		self:_HideResult()    -- 지난 강화 결과 이미지가 남아 있지 않게
+		self:Refresh()
+		log("[EnhanceUI] 강화 패널 열기 — 대상 " .. tostring(self:_TargetHeroId()))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _ShowResult(string ruid)
+		-- 강화 결과 이미지를 잠깐 띄운다. Result는 패널 루트의 직계 자식이다.
+		local e = self:_Find("Result")
+		if not isvalid(e) then return end
+		local c = e.SpriteGUIRendererComponent
+		if c == nil then return end
+		-- 세 RUID는 animationclip(성공/실패/파괴 이펙트)이다.
+		-- 한 번만 재생시킨다 — SpriteGUIRendererComponent의 기본값은 Loop라 그냥 두면
+		-- 한 바퀴 더 돌기 시작한 뒤 숨김 타이머에 잘려 "다시 시작했다 사라지는" 것처럼 보인다.
+		c.AnimClipPlayType = SpriteAnimClipPlayType.Onetime
+		-- 같은 결과가 연달아 나와도 프레임 0부터 다시 재생되도록 껐다 켠다.
+		-- 크기·비율은 Result 엔티티의 RectSize와 PreserveSprite를 그대로 따른다(여기서 건드리지 않는다).
+		e.Enable = false
+		c.ImageRUID = ruid
+		e.Enable = true
+		-- 연속으로 강화하면 앞선 타이머가 뒤늦게 새 연출을 지운다. 세대 카운터로 무효화한다
+		-- (MonsterManager의 battleGen과 같은 방식).
+		self._T.resultGen = (self._T.resultGen or 0) + 1
+		local gen = self._T.resultGen
+		_TimerService:SetTimerOnce(function()
+			if self._T.resultGen ~= gen then return end
+			self:_HideResult()
+		end, 1.5)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _HideResult()
+		self._T.resultGen = (self._T.resultGen or 0) + 1   -- 예약된 타이머도 함께 무효화
+		local e = self:_Find("Result")
+		if isvalid(e) then e.Enable = false end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Close()
+		self._T.enhancing = false
+		self._T.pendingResult = nil
+		self:_HideResult()
+		if isvalid(self.panel) then self.panel.Enable = false end
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsOpen()
+		return isvalid(self.panel) and self.panel.Enable == true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _ClearProtectIfNoDestroy()
+		-- 대상이 바뀌었는데 그 단계에 파괴가 없으면 켜 둘 이유가 없다 → 자동으로 끈다.
+		-- (같은 대상에서 단계만 오르내리는 동안에는 건드리지 않는다. 토글은 그대로 유지된다.)
+		if self._T.useProtect ~= true then return end
+		local heroId = self:_TargetHeroId()
+		if heroId == "" then return end
+		local row = _HeroDataManager:GetStarforceData(_HeroDataManager:GetStarforceLevelClient(heroId) + 1)
+		if row == nil or (row.DestroyRate or 0) <= 0 then
+			self._T.useProtect = false
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SelectTarget(integer index)
+		local list = self:_Targets()
+		if list[index] == nil then return end
+		self._T.targetIndex = index
+		self:_ClearProtectIfNoDestroy()
+		self:Refresh()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SelectSlot(integer slotNo)
+		-- 슬롯 번호(1~5)는 현재 페이지 안에서의 자리다. 절대 인덱스로 환산해 넘긴다.
+		self:SelectTarget(self:_PageStart() + slotNo)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void NextTarget()
+		-- "강화 대상 변경" 버튼. 보유 영웅을 순환하며, 페이지도 따라 넘어간다.
+		local list = self:_Targets()
+		if #list == 0 then return end
+		self._T.targetIndex = (self._T.targetIndex or 1) % #list + 1
+		self:_ClearProtectIfNoDestroy()
+		self:Refresh()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ToggleProtect()
+		-- 켜고 끄기만 한다. 파괴가 없는 단계에서 켜도 막지 않는다 —
+		-- 상태는 그대로 남아 있다가 파괴 구간(16강↑)에 오면 저절로 적용된다.
+		self._T.useProtect = not (self._T.useProtect == true)
+		self:Refresh()
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer _StarLevelOf(string heroId)
+		local data = _HeroDataManager:GetInventoryData()
+		local heroes = (data ~= nil and data.heroes) or {}
+		return _HeroDataManager:CalcStarLevel(heroId, tonumber(heroes[heroId]) or 0)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Refresh()
+		local heroId = self:_TargetHeroId()
+		if heroId == "" then return end
+		local base = _HeroDataManager:GetHeroBaseData(heroId)
+		if base == nil then return end
+
+		local starLv  = self:_StarLevelOf(heroId)
+		local sfLevel = _HeroDataManager:GetStarforceLevelClient(heroId)
+		local maxed   = sfLevel >= 25
+
+		-- 대상 패널
+		self:_SetPortrait("TargetPanel/Frame/Icon", heroId)
+		self:_SetText("TargetPanel/NameBox/Label", base.Name or heroId)
+		-- 좌측 StarText는 숨긴다. 스타포스 단계는 중앙의 "n강 → n+1강"에 이미 나온다.
+		-- 엔티티를 지우지 않고 Enable만 끈다 — 화면 파일은 사용자가 잡은 레이아웃이라 건드리지 않는다.
+		local starText = self:_Find("TargetPanel/StarText")
+		if isvalid(starText) then starText.Enable = false end
+		self:_SetThumbnail("CenterPanel/HeroBig", heroId, 0.40)
+
+		-- 대상 슬롯 5칸 = 보유 영웅 목록의 현재 페이지. 선택된 칸만 배경 RUID를 바꾼다.
+		local SELECTED_SLOT_RUID = "ef1dce6eaf904ce39694b6a1be344fb5"
+		local list  = self:_Targets()
+		local start = self:_PageStart()
+		local cur   = self._T.targetIndex or 1
+		for i = 1, 5 do
+			local slot = self:_Find("TargetPanel/Slot" .. tostring(i))
+			if isvalid(slot) then
+				local hid = list[start + i]
+				slot.Enable = (hid ~= nil)
+				if hid ~= nil then
+					local sc = slot.SpriteGUIRendererComponent
+					if sc ~= nil then
+						-- 선택 표시는 배경 RUID 교체로 한다. 반투명/밝기는 건드리지 않는다.
+						if start + i == cur then
+							sc.ImageRUID = SELECTED_SLOT_RUID
+						else
+							local baseRUID = (self._T.slotBaseRUID or {})[i]
+							if baseRUID ~= nil then sc.ImageRUID = baseRUID end
+						end
+					end
+					-- 아이콘은 상반신 초상(PortraitRUID). 전신 아트를 0.07로 줄이면 얼굴이 안 보인다.
+					self:_SetPortrait("TargetPanel/Slot" .. tostring(i) .. "/Icon", hid)
+				end
+			end
+		end
+		self:_SetText("TargetPanel/ChangeTarget", "강화 대상 변경  " .. tostring(cur) .. "/" .. tostring(#list))
+
+		-- 현재/다음 스탯
+		local curAtk = _HeroDataManager:CalcATK(base.BaseATK, starLv, sfLevel)
+		local curHp  = _HeroDataManager:CalcHP(base.BaseHP, starLv, sfLevel)
+
+		if maxed then
+			self:_SetText("CenterPanel/LevelText", "최고 단계 달성")
+			self:_SetText("InfoPanel/RowAtk/Value", tostring(math.floor(curAtk)))
+			self:_SetText("InfoPanel/RowHp/Value", tostring(math.floor(curHp)))
+			self:_SetText("InfoPanel/RowSuccess/Value", "-")
+			self:_SetText("InfoPanel/RowFail/Value", "-")
+			self:_SetText("InfoPanel/RowDown/Value", "-")
+			self:_SetText("InfoPanel/RowDestroy/Value", "-")
+			self:_SetText("InfoPanel/FailNote", "")
+			self:_SetText("CostBox/GoldText", "-")
+			self:_SetText("CostBox/StoneText", "-")
+			self:_SetText("ProtectToggle/State", "사용 불가")
+			self:_SetEnhanceEnabled(false, "")   -- 더 올릴 단계가 없다(안내는 중앙 단계 표시로 충분)
+			return
+		end
+
+		local nextSF = sfLevel + 1
+		local row = _HeroDataManager:GetStarforceData(nextSF)
+		if row == nil then return end
+
+		local nextAtk = _HeroDataManager:CalcATK(base.BaseATK, starLv, nextSF)
+		local nextHp  = _HeroDataManager:CalcHP(base.BaseHP, starLv, nextSF)
+
+		self:_SetText("CenterPanel/LevelText", tostring(sfLevel) .. "강  →  " .. tostring(nextSF) .. "강")
+		self:_SetText("InfoPanel/RowAtk/Value", tostring(math.floor(curAtk)) .. "  →  " .. tostring(math.floor(nextAtk)))
+		self:_SetText("InfoPanel/RowHp/Value", tostring(math.floor(curHp)) .. "  →  " .. tostring(math.floor(nextHp)))
+
+		-- 보호는 "파괴 방지"다. 파괴가 있는 단계(16강↑)에서만 의미가 있다.
+		local canProtect = (row.DestroyRate or 0) > 0 and (row.ProtectStoneCost or 0) > 0
+		local protecting = canProtect and (self._T.useProtect == true)
+
+		-- 네 확률의 합이 100%다. 유지(실패)는 나머지로 유도한다.
+		-- 파괴 방지를 켜면 파괴 몫이 통째로 하락으로 옮겨간다(막는 게 아니라 대체된다).
+		local rate       = row.SuccessRate   or 100
+		local rawDestroy = row.DestroyRate   or 0
+		local destroy    = protecting and 0 or rawDestroy
+		local down       = (row.DowngradeRate or 0) + (protecting and rawDestroy or 0)
+		self:_SetText("InfoPanel/RowSuccess/Value", self:_Pct(rate))
+		self:_SetText("InfoPanel/RowFail/Value",    self:_Pct(100 - rate - destroy - down))
+		self:_SetText("InfoPanel/RowDown/Value",    self:_Pct(down))
+		self:_SetText("InfoPanel/RowDestroy/Value", self:_Pct(destroy))
+
+		if protecting then
+			self:_SetText("InfoPanel/FailNote", "파괴 방지 적용 — 파괴 대신 1강 하락합니다")
+		elseif rawDestroy > 0 then
+			self:_SetText("InfoPanel/FailNote", "파괴 시 12강으로 복구됩니다 (영웅은 사라지지 않습니다)")
+		elseif (row.DowngradeRate or 0) > 0 then
+			self:_SetText("InfoPanel/FailNote", "실패 시 1강 하락합니다.")
+		else
+			self:_SetText("InfoPanel/FailNote", "실패해도 강화 단계가 유지됩니다.")
+		end
+
+		-- 토글은 다시 끌 때까지 켜진 채로 남는다. 파괴가 없는 단계에서는 켜져 있어도 비용을 받지 않는다.
+		if canProtect then
+			self:_SetText("ProtectToggle/State",
+				(protecting and "ON" or "OFF") .. "  (결정석 +" .. tostring(row.ProtectStoneCost) .. ")")
+		elseif self._T.useProtect == true then
+			self:_SetText("ProtectToggle/State", "ON  (이 단계는 파괴 없음)")
+		else
+			self:_SetText("ProtectToggle/State", "필요 없음")
+		end
+
+		local stoneCost = (row.StoneCost or 0) + (protecting and (row.ProtectStoneCost or 0) or 0)
+		local goldCost  = row.GoldCost or 0
+		self:_SetText("CostBox/GoldText", tostring(goldCost))
+		self:_SetText("CostBox/StoneText", tostring(stoneCost))
+
+		-- 다음 강화를 감당할 수 있는지. 대상이나 보호 토글이 바뀌면 여기서 다시 계산되므로,
+		-- 충족하면 버튼이 저절로 살아나고 안내 문구도 지워진다.
+		local cm = _HeroDataManager.CurrencyManager
+		if isvalid(cm) then
+			local lackGold  = cm:GetGold()  < goldCost
+			local lackStone = cm:GetStone() < stoneCost
+			if lackGold and lackStone then
+				self:_SetEnhanceEnabled(false, "골드와 강화 결정석이 부족합니다")
+			elseif lackGold then
+				self:_SetEnhanceEnabled(false, "골드가 부족합니다")
+			elseif lackStone then
+				self:_SetEnhanceEnabled(false, "강화 결정석이 부족합니다")
+			else
+				self:_SetEnhanceEnabled(true, "")
+			end
+		else
+			self:_SetEnhanceEnabled(true, "")
+		end
+	end
+
+
+	@ExecSpace("ClientOnly")
+	method void OnClickEnhance()
+		-- 강화음 → 결과 연출이 끝날 때까지 다시 누를 수 없다(연타 방지).
+		if self._T.enhancing == true then return end
+
+		local heroId = self:_TargetHeroId()
+		if heroId == "" then return end
+		local sfLevel = _HeroDataManager:GetStarforceLevelClient(heroId)
+		if sfLevel >= 25 then
+			_UIToast:ShowMessage("이미 최고 단계입니다.")
+			return
+		end
+
+		-- 재화가 모자라면 소리도 요청도 내지 않는다.
+		-- 서버가 돌려주는 "cost"는 최종 판정이고(권위), 여기서는 헛된 연출을 막는 용도다.
+		local row = _HeroDataManager:GetStarforceData(sfLevel + 1)
+		if row == nil then return end
+		local canProtect = (row.DestroyRate or 0) > 0 and (row.ProtectStoneCost or 0) > 0
+		local protecting = canProtect and (self._T.useProtect == true)
+		local needGold  = row.GoldCost or 0
+		local needStone = (row.StoneCost or 0) + (protecting and (row.ProtectStoneCost or 0) or 0)
+		local cm = _HeroDataManager.CurrencyManager
+		if isvalid(cm) then
+			local lackGold  = cm:GetGold()  < needGold
+			local lackStone = cm:GetStone() < needStone
+			if lackGold and lackStone then
+				_UIToast:ShowMessage("골드와 강화 결정석이 부족합니다.")
+				return
+			elseif lackGold then
+				_UIToast:ShowMessage("골드가 " .. tostring(needGold - cm:GetGold()) .. " 부족합니다.")
+				return
+			elseif lackStone then
+				_UIToast:ShowMessage("강화 결정석이 " .. tostring(needStone - cm:GetStone()) .. "개 부족합니다.")
+				return
+			end
+		end
+
+		self._T.enhancing = true
+		self._T.sfxDone = false
+		self._T.pendingResult = nil
+		self._T.seq = (self._T.seq or 0) + 1
+		local seq = self._T.seq
+
+		_SoundService:PlaySound("ac0a6bab44444690b1f4248fdbc768a8", 1.0)   -- Enchant (강화 시도음)
+
+		-- PlaySound에는 재생 종료 콜백이 없다(SoundPlayStateChangedEvent는 BGM/SoundComponent용).
+		-- 그래서 클립 길이만큼 타이머로 기다린다. 소리를 바꾸면 이 값도 같이 맞출 것.
+		_TimerService:SetTimerOnce(function()
+			if self._T.seq ~= seq then return end   -- 이미 다음 강화가 시작됨
+			self._T.sfxDone = true
+			local pending = self._T.pendingResult
+			if pending ~= nil then
+				self._T.pendingResult = nil
+				self:_PresentResult(pending.code, pending.level)
+			end
+		end, 1.1)
+
+		-- 응답이 유실돼도 버튼이 영구히 잠기지 않도록 안전장치를 둔다.
+		_TimerService:SetTimerOnce(function()
+			if self._T.seq == seq then self._T.enhancing = false end
+		end, 8.0)
+
+		log("[EnhanceUI] 강화 요청 " .. heroId .. " " .. tostring(sfLevel) .. "강 보호=" .. tostring(self._T.useProtect == true))
+		_HeroDataManager:RequestStarforceEnhance(heroId, self._T.useProtect == true)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _PresentResult(string resultCode, integer newSFLevel)
+		-- 이펙트(animationclip)와 소리(audioclip)는 결과별로 짝을 이룬다.
+		-- 유지(keep)도 실패의 일종이라 실패 연출을 쓴다.
+		if resultCode == "success" then
+			self:_ShowResult("a77fc5c65a544883a25fcaa1430178c0")
+			_SoundService:PlaySound("87e19c7bfdd14c94914cdf3f6061e756", 1.0)   -- EnchantSuccess
+			_UIToast:ShowMessage(tostring(newSFLevel) .. "강 강화 성공!")
+		elseif resultCode == "keep" then
+			self:_ShowResult("4cef2f39225d4500bc748afcadd4cb6d")
+			_SoundService:PlaySound("3cbefdfa4eb5450c89b948dfb64ba23a", 1.0)   -- EnchantFail
+			_UIToast:ShowMessage("강화 실패 — 단계 유지")
+		elseif resultCode == "down" then
+			self:_ShowResult("4cef2f39225d4500bc748afcadd4cb6d")
+			_SoundService:PlaySound("3cbefdfa4eb5450c89b948dfb64ba23a", 1.0)
+			_UIToast:ShowMessage("강화 실패 — " .. tostring(newSFLevel) .. "강으로 하락")
+		elseif resultCode == "destroy" then
+			self:_ShowResult("869e367d76ce48dbaff4065329260959")
+			_SoundService:PlaySound("0a586d08d09e4a2a9849020efd59b860", 1.0)   -- EnchantDestroyed
+			_UIToast:ShowMessage("파괴! — " .. tostring(newSFLevel) .. "강으로 복구되었습니다")
+		end
+
+		-- 결과 연출이 끝나야 버튼이 다시 열린다(_ShowResult의 숨김 시간과 맞춘다).
+		local seq = self._T.seq
+		_TimerService:SetTimerOnce(function()
+			if self._T.seq == seq then self._T.enhancing = false end
+		end, 1.5)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnStarforceResult(string heroId, boolean success, integer newSFLevel, string resultCode)
+		-- 요청 자체가 무산된 경우(재화 부족·만렙·데이터 없음)는 기다릴 것 없이 바로 풀어 준다.
+		if resultCode == "cost" or resultCode == "max" or resultCode == "data" then
+			self._T.enhancing = false
+			if not self:IsOpen() then return end
+			if resultCode == "cost" then _UIToast:ShowMessage("재화가 부족합니다.")
+			elseif resultCode == "max" then _UIToast:ShowMessage("이미 최고 단계입니다.") end
+			self:Refresh()
+			return
+		end
+
+		-- 패널이 닫혀 있으면 연출할 것이 없다(인벤토리 쪽 버튼으로 강화한 경우).
+		if not self:IsOpen() then
+			self._T.enhancing = false
+			return
+		end
+
+		-- 숫자는 바로 갱신하되, 이펙트와 소리는 **강화음이 끝난 뒤에** 낸다.
+		-- 응답이 강화음보다 빨리 올 수도, 늦게 올 수도 있어서 양쪽 순서를 모두 처리한다.
+		self:Refresh()
+		if self._T.sfxDone == true then
+			self:_PresentResult(resultCode, newSFLevel)
+		else
+			self._T.pendingResult = { code = resultCode, level = newSFLevel }
+		end
+	end
+
+end
+

@@ -1,0 +1,23 @@
+@Component
+script UIMailRow extends Component
+
+	-- 우편 목록의 행 1칸. 12칸 전부에 같은 스크립트를 붙이고,
+	-- **자기 엔티티 이름(`Row1`~`Row12`)에서 번호를 뽑아** 몇 번째 우편인지 알아낸다.
+	-- (`HeroCardUI`가 `HeroCard_<heroId>`를 파싱하는 것과 같은 방식 — 행마다 스크립트를 나누지 않아도 된다)
+
+	@EventSender("Self")
+	handler HandleButtonClickEvent(ButtonClickEvent event)
+		--------------- Native Event Sender Info ----------------
+		-- Sender: ButtonComponent
+		-- Space: Client
+		---------------------------------------------------------
+		local name = self.Entity.Name or ""
+		local num  = string.match(name, "%d+")
+		if num == nil then
+			log_warning("[UIMailRow] 엔티티 이름에서 번호를 못 찾았다: " .. tostring(name))
+			return
+		end
+		_MailUI:OnClickRow(tonumber(num))
+	end
+
+end

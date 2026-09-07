@@ -1,0 +1,13 @@
+@Component
+script UIMailAdminClose extends Component
+
+	@EventSender("Self")
+	handler HandleButtonClickEvent(ButtonClickEvent event)
+		--------------- Native Event Sender Info ----------------
+		-- Sender: ButtonComponent
+		-- Space: Client
+		---------------------------------------------------------
+		_MailAdminUI:Close()
+	end
+
+end

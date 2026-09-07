@@ -1,0 +1,215 @@
+@Component
+script UISkillPopup extends Component
+
+	property Entity Slot0 = "517e86bc-3b2f-44df-b6dc-c108610223f5"
+
+	property Entity Slot1 = "f5844d42-d140-451d-a1c1-327a69ff5eb5"
+
+	property Entity Slot2 = "e511dfd3-1c7c-453e-8c0e-a9482c0706bc"
+
+	property Entity Slot3 = "68d0bc40-a900-461e-89a4-529148858fed"
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		self._T.pool   = {}
+		self._T.active = {}   -- { ent, timerId } 목록 (오래된 것이 앞)
+		self._T.slotH  = 100  -- 슬롯 높이 + 간격 (px) — 필요 시 조정
+		self._T.baseX  = -200 -- 팝업이 멈출 X 위치 — 필요 시 조정
+		self._T.baseY  = 60 -- 가장 아래 슬롯 Y (매니저 앵커 기준) — 필요 시 조정
+		local slots = { self.Slot0, self.Slot1, self.Slot2, self.Slot3 }
+		for _, ent in ipairs(slots) do
+			if isvalid(ent) then
+				ent.Enable = false
+				table.insert(self._T.pool, ent)
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Show(string skillId)
+		-- 풀에서 슬롯 확보
+		if #self._T.pool > 0 then
+			local slot = table.remove(self._T.pool, 1)
+			self:_ActivateSlot(slot, skillId)
+		elseif #self._T.active > 0 then
+			local oldest = table.remove(self._T.active, 1)
+			if oldest.timerId ~= nil then _TimerService:ClearTimer(oldest.timerId) end
+			self:_EvictAndActivate(oldest.ent, skillId)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _EvictAndActivate(Entity ent, string skillId)
+		ent.Enable = false
+		self:_ActivateSlot(ent, skillId)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _ResetSlotAlpha(Entity slot)
+		local slotSpr = slot.SpriteGUIRendererComponent
+		if slotSpr ~= nil then slotSpr.Color = Color(1, 1, 1, 1) end
+		local ic = slot:GetChildByName("SkillImage")
+		local tc = slot:GetChildByName("SkillNameText")
+		if isvalid(ic) then
+			local spr = ic.SpriteGUIRendererComponent
+			if spr ~= nil then spr.Color = Color(1, 1, 1, 1) end
+		end
+		if isvalid(tc) then
+			local txt = tc.TextGUIRendererComponent
+			if txt ~= nil then txt.FontColor = Color(1, 1, 1, 1) end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _ActivateSlot(Entity slot, string skillId)
+		-- disabled 상태에서 위치·컨텐츠·알파 초기화
+		local rc = slot.UITransformComponent
+		local startX = self._T.baseX + 400
+		if rc ~= nil then rc.anchoredPosition = Vector2(startX, self._T.baseY) end
+		self:_SetContent(slot, skillId)
+		self:_ResetSlotAlpha(slot)
+		
+		-- 기존 팝업 위로 밀기
+		for _, it in ipairs(self._T.active) do
+			self:_ShiftSlotUp(it.ent)
+		end
+		
+		-- active에 먼저 등록 (evict 추적); timerId는 다음 틱에 채움
+		local newItem = { ent = slot, timerId = nil }
+		table.insert(self._T.active, newItem)
+		
+		-- 다음 틱에 Enable → 렌더 엔진이 위치·색상·이미지를 반영한 뒤 표시
+		local entity = slot
+		local sX     = startX
+		local bX     = self._T.baseX
+		local bY     = self._T.baseY
+		local comp   = self
+		_TimerService:SetTimerOnce(function()
+			entity.Enable = true
+			-- 활성화 순서대로 최상위 렌더(맨 앞)로 이동 → 최신 슬롯(밑)이 오래된 슬롯(위)을 가림
+			if rc ~= nil then _UILogic:SetSiblingIndex(rc, 100) end
+			_TweenLogic:PlayTween(
+				Vector2(sX, bY), Vector2(bX, bY),
+				0.4, EaseType.ExpoEaseOut,
+				function(v)
+					if isvalid(entity) then
+						local r = entity.UITransformComponent
+						if r ~= nil then r.anchoredPosition = v end
+					end
+				end)
+			newItem.timerId = _TimerService:SetTimerOnce(function()
+				comp:_FadeOut(entity)
+			end, 2.3)
+		end, 0)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _ShiftSlotUp(Entity ent)
+		local rc = ent.UITransformComponent
+		if rc == nil then return end
+		local cur = rc.anchoredPosition
+		local target = Vector2(cur.x, cur.y + self._T.slotH)
+		local e = ent
+		_TweenLogic:PlayTween(cur, target, 0.3, EaseType.QuadEaseOut,
+			function(v)
+				if isvalid(e) then
+					local r = e.UITransformComponent
+					if r ~= nil then r.anchoredPosition = v end
+				end
+			end)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _SetContent(Entity slot, string skillId)
+		-- HeroSkillSet에서 HeroId + SkillName + IconRUID 조회
+		local heroId    = ""
+		local heroName  = ""
+		local iconRUID  = ""
+		local skillCount = _DataService:GetRowCount("HeroSkillSet")
+		for i = 1, skillCount do
+			if _DataService:GetCell("HeroSkillSet", i, "SkillId") == skillId then
+				heroId   = _DataService:GetCell("HeroSkillSet", i, "HeroId") or ""
+				heroName = _DataService:GetCell("HeroSkillSet", i, "SkillName") or ""
+				iconRUID = _DataService:GetCell("HeroSkillSet", i, "IconRUID") or ""
+				break
+			end
+		end
+		-- HeroSet에서 SkillPopup RUID 조회 → Slot 자체 스프라이트에 적용
+		if heroId ~= "" then
+			local heroCount = _DataService:GetRowCount("HeroSet")
+			for i = 1, heroCount do
+				if _DataService:GetCell("HeroSet", i, "HeroId") == heroId then
+					local slotRUID = _DataService:GetCell("HeroSet", i, "SkillPopup") or ""
+					if slotRUID ~= "" then
+						local spr = slot.SpriteGUIRendererComponent
+						if spr ~= nil then spr.ImageRUID = DataRef(slotRUID) end
+					end
+					break
+				end
+			end
+		end
+		-- SkillImage 자식 → IconRUID
+		local imgChild = slot:GetChildByName("SkillImage")
+		if isvalid(imgChild) and iconRUID ~= "" then
+			local spr = imgChild.SpriteGUIRendererComponent
+			if spr ~= nil then spr.ImageRUID = DataRef(iconRUID) end
+		end
+		local txtChild = slot:GetChildByName("SkillNameText")
+		if isvalid(txtChild) then
+			local txt = txtChild.TextGUIRendererComponent
+			if txt ~= nil then txt.Text = heroName end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _FadeOut(Entity entity)
+		if not isvalid(entity) then return end
+		
+		-- active 리스트에서 제거
+		for i, it in ipairs(self._T.active) do
+			if it.ent == entity then
+				table.remove(self._T.active, i)
+				break
+			end
+		end
+		
+		-- 0.5초 페이드아웃
+		local comp = self
+		local tween = _TweenLogic:PlayTween(1.0, 0.0, 0.5, EaseType.QuadEaseIn,
+			function(a)
+				if not isvalid(entity) then return end
+				local ic = entity:GetChildByName("SkillImage")
+				local tc = entity:GetChildByName("SkillNameText")
+				if isvalid(ic) then
+					local spr = ic.SpriteGUIRendererComponent
+					if spr ~= nil then spr.Color = Color(1, 1, 1, a) end
+				end
+				if isvalid(tc) then
+					local txt = tc.TextGUIRendererComponent
+					if txt ~= nil then txt.FontColor = Color(1, 1, 1, a) end
+				end
+			end)
+		
+		if tween ~= nil then
+			tween:SetOnEndCallback(function()
+				if not isvalid(entity) then return end
+				entity.Enable = false
+				local ic = entity:GetChildByName("SkillImage")
+				local tc = entity:GetChildByName("SkillNameText")
+				if isvalid(ic) then
+					local spr = ic.SpriteGUIRendererComponent
+					if spr ~= nil then spr.Color = Color(1, 1, 1, 1) end
+				end
+				if isvalid(tc) then
+					local txt = tc.TextGUIRendererComponent
+					if txt ~= nil then txt.FontColor = Color(1, 1, 1, 1) end
+				end
+				table.insert(comp._T.pool, entity)
+			end)
+		else
+			entity.Enable = false
+			table.insert(self._T.pool, entity)
+		end
+	end
+
+end

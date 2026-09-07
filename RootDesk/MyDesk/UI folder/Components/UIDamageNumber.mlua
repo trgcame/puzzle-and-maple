@@ -1,0 +1,135 @@
+@Component
+script UIDamageNumber extends Component
+
+	method void OnBeginPlay()
+		self._T.active = false
+		self.Entity.Enable = false
+		-- 자릿수 슬롯(`D0`, `D1`, …)을 **있는 만큼** 잡는다.
+		-- 예전에는 `for i = 0, 5`으로 6자리가 코드에 박혀 있어서, `.ui`에 칸을 더 만들어도
+		-- 코드가 안 쓰고 **7자리 피해가 앞 6글자만 찍혀 조용히 틀린 숫자**가 나왔다
+		-- (1,441,062 → "144106"). 이제 칸을 늘리면 코드 수정 없이 따라간다.
+		self._T.digits = {}
+		local i = 0
+		while true do
+			local d = self.Entity:GetChildByName("D" .. tostring(i))
+			if not isvalid(d) then break end
+			self._T.digits[i + 1] = d
+			i = i + 1
+		end
+		self._T.slotCount = i
+		log("[UIDamageNumber] 자릿수 슬롯 " .. tostring(i) .. "칸")
+		-- animationclip 3eff86e9의 개별 프레임 sprite RUID (0~9)
+		self._T.digitRUIDs = {
+			"8213b9817bc24ad7b83f20994717a758",
+			"78cafc698a814d84a6d6bbedb5ca9198",
+			"2c63ed5568fe4363b4dee20afa96ead8",
+			"2bbb234c655d4410a49d82fa8a74e600",
+			"b79619d8dc5244958ae06fd82f25d3d1",
+			"1f0ed2090868466f812e4300fa320105",
+			"f755339fc6304db486a2018dfd6f7509",
+			"430139afcbad44f18c110616d68f421c",
+			"3a8abe8967b34a5d9b524882f2399337",
+			"d245119dfa2a4fb4b178d1931877f2dd",
+		}
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsAvailable()
+		return not (self._T.active or false)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Play(integer damage, Vector2 anchoredPos)
+		local slots  = self._T.slotCount or 0
+		local digits = self._T.digits or {}
+		local s = tostring(math.floor(math.max(0, damage)))
+		-- 칸이 모자라면 **앞자리만 찍혀 자릿수가 통째로 줄어든 숫자**가 나온다.
+		-- 그건 틀린 값을 그럴듯하게 보여주는 것이라, 차라리 9로 꽉 채워 "한계 초과"를 드러낸다.
+		if slots > 0 and #s > slots then
+			log_warning("[UIDamageNumber] 자릿수 초과 — " .. s .. " (" .. tostring(#s) .. "자리 > 슬롯 " .. tostring(slots) .. "칸). `.ui`의 D<n> 칸을 늘릴 것")
+			s = string.rep("9", slots)
+		end
+		local n = #s
+		local digitW = 24
+
+		for i = 1, slots do
+			local ent = digits[i]
+			if not isvalid(ent) then continue end
+			if i <= n then
+				local d = tonumber(s:sub(i, i)) or 0
+				local spr = ent.SpriteGUIRendererComponent
+				if spr ~= nil then
+					local ruids = self._T.digitRUIDs or {}
+					spr.ImageRUID = DataRef(ruids[d + 1] or "")
+					spr.Type  = ImageType.Simple
+					spr.Color = Color(1, 1, 1, 1)
+				end
+				local rc = ent.UITransformComponent
+				if rc ~= nil then
+					local startX = -(n * digitW) / 2 + digitW / 2
+					rc.anchoredPosition = Vector2(startX + (i - 1) * digitW, 0)
+				end
+				ent.Enable = true
+			else
+				ent.Enable = false
+			end
+		end
+		
+		local myRC = self.Entity.UITransformComponent
+		if myRC ~= nil then
+			myRC.anchoredPosition = anchoredPos
+		end
+		-- ⚠️ 좌표를 **먼저** 잡고 마지막에 active를 켠다.
+		-- 반대로 하면(예전 순서) 좌표 대입에서 문제가 생겼을 때 `active=true`인데
+		-- `startX/startY`가 nil로 남아 `OnUpdate`가 매 프레임 nil 산술로 죽는다
+		-- (`[LEA-2001] 'startY'은 nil입니다` — 2026-09-06 보스전 로그에서 실제로 발생).
+		self._T.elapsed = 0
+		self._T.startX  = anchoredPos.x
+		self._T.startY  = anchoredPos.y
+		self._T.n       = n
+		self.Entity.Enable = true
+		self._T.active  = true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		if not (self._T.active or false) then return end
+		-- 좌표 없이 active만 켜진 상태에 대한 안전장치. 조용히 되돌리고 빠진다.
+		if self._T.startX == nil or self._T.startY == nil then
+			self._T.active = false
+			self.Entity.Enable = false
+			log_warning("[UIDamageNumber] 좌표 없이 active — 초기화하고 중단")
+			return
+		end
+		local duration = 1.2
+		self._T.elapsed = (self._T.elapsed or 0) + delta
+		local t = self._T.elapsed / duration
+		if t >= 1 then
+			local rc = self.Entity.UITransformComponent
+			if rc ~= nil then
+				rc.anchoredPosition = Vector2(self._T.startX, self._T.startY)
+			end
+			self.Entity.Enable = false
+			self._T.active = false
+			return
+		end
+		
+		local rc = self.Entity.UITransformComponent
+		if rc ~= nil then
+			rc.anchoredPosition = Vector2(self._T.startX, self._T.startY + 40 * t)
+		end
+		
+		if t > 0.5 then
+			local alpha = 1.0 - (t - 0.5) / 0.5
+			local digits = self._T.digits or {}
+			for i = 1, (self._T.n or self._T.slotCount or 0) do
+				local ent = digits[i]
+				if isvalid(ent) and ent.Enable then
+					local spr = ent.SpriteGUIRendererComponent
+					if spr ~= nil then spr.Color = Color(1, 1, 1, alpha) end
+				end
+			end
+		end
+	end
+
+end

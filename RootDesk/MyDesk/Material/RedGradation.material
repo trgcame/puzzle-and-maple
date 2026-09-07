@@ -1,0 +1,53 @@
+{
+  "Id": "",
+  "GameId": "",
+  "EntryKey": "material://233805dc-66c0-4773-b9b5-33531112d3c9",
+  "ContentType": "x-mod/material",
+  "Content": "",
+  "Usage": 0,
+  "UsePublish": 1,
+  "UseService": 0,
+  "CoreVersion": "26.5.0.0",
+  "StudioVersion": "0.1.0.0",
+  "DynamicLoading": 0,
+  "ContentProto": {
+    "Use": "Json",
+    "Json": {
+      "name": "RedGradation",
+      "id": "233805dc-66c0-4773-b9b5-33531112d3c9",
+      "shadertype": "VertexGradient",
+      "Blend": 1.0,
+      "BottomLeftColor": {
+        "r": 0.212890625,
+        "g": 0.04365921,
+        "b": 0.06944056,
+        "a": 1.0
+      },
+      "BottomRightColor": {
+        "r": 0.306640625,
+        "g": 0.000598907471,
+        "b": 0.000598907471,
+        "a": 1.0
+      },
+      "BoundaryPos": {
+        "x": 0.5,
+        "y": 0.5
+      },
+      "LitMode": 0,
+      "TopLeftColor": {
+        "r": 0.447265625,
+        "g": 0.110942841,
+        "b": 0.110942841,
+        "a": 1.0
+      },
+      "TopRightColor": {
+        "r": 0.253887177,
+        "g": 0.263671875,
+        "b": 0.253887177,
+        "a": 1.0
+      },
+      "IsUIMaterial": false,
+      "RequiresUIStencilStateChange": false
+    }
+  }
+}

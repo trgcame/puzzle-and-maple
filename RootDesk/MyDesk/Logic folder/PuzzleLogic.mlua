@@ -1,0 +1,206 @@
+@Logic
+script PuzzleLogic extends Logic
+
+	property Entity CurrentDragPuzzle = nil
+
+	property Entity LastSwapPuzzle = nil
+
+	property table MatchResult = {}
+
+	property BattleManager BattleManager = "19ce6a28-58bd-4542-92b8-c265bc6eda48"
+
+	property TurnManager TurnManager = "43e421d6-5bf3-4ec4-bb64-562f3c811a45"
+
+	property Entity PuzzleBoard = "9e1017be-9c29-4a50-b288-cbeb2b50a0c8"
+
+	property UIComboCount ComboDisplay = "b684551f-e1fd-4bce-9094-51a3d1721d5f"
+
+	-- 드래그 제한 시간(초). 0이면 무제한. 2026-09-07 사용자 지시로 신설.
+	property number DragTimeLimit = 10.0
+
+	-- 남은 시간 표시 = **시계 게이지**(`PuzzleBoard/DragTimer`). 드래그 중인 타일을 따라 움직인다.
+	-- 링 스프라이트 2장(어두운 Track + Radial360 Filled인 Fill) 구조라 Fill만 깎으면 된다.
+	-- 없으면 표시만 생략하고 제한 자체는 그대로 동작한다.
+	property Entity DragTimerRoot = "7bc51416-eabf-474f-9992-21bf8b77a0cf"
+	property Entity DragTimerFill = "1b4ac5ee-27e4-4fb5-941e-c96a763cb3ea"
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StartGame()
+		self.PuzzleBoard.PuzzleBoard:SetPuzzles()
+	end
+
+	method boolean CanDragPuzzle(Entity puzzle)
+		return self.CurrentDragPuzzle == nil or self.CurrentDragPuzzle == puzzle
+	end
+
+	method void StartDrag(Entity puzzle)
+		self.CurrentDragPuzzle = puzzle
+		-- 제한 시간 시작. `_T.dragElapsed`가 nil이 아니면 `OnUpdate`가 재고 있다는 뜻이다.
+		self._T.dragElapsed = 0
+		self:_ShowDragTimer(self.DragTimeLimit)
+	end
+
+	method void EndDrag()
+		self.CurrentDragPuzzle = nil
+		self.LastSwapPuzzle = nil
+		self._T.dragElapsed = nil
+		self:_ShowDragTimer(nil)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _ShowDragTimer(any remain)
+		-- remain이 nil이면 숨긴다. 남은 비율을 Radial360 `FillAmount`로 그린다(시계처럼 12시에서 시작).
+		if not isvalid(self.DragTimerRoot) then return end
+		local limit = self.DragTimeLimit or 0
+		if remain == nil or limit <= 0 then
+			self.DragTimerRoot.Enable = false
+			return
+		end
+		self.DragTimerRoot.Enable = true
+		self:_MoveDragTimer()
+
+		if not isvalid(self.DragTimerFill) then return end
+		local c = self.DragTimerFill.SpriteGUIRendererComponent
+		if c == nil then return end
+		c.FillAmount = math.max(0, math.min(1, remain / limit))
+		-- ⚠️ 링 길이만으로는 남은 시간이 잘 안 읽힌다 → 3초 미만이면 붉게 바꿔 경고한다.
+		if remain <= 3 then
+			c.Color = Color(1, 0.28, 0.24, 1)
+		else
+			c.Color = Color(1, 0.84, 0.26, 1)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _MoveDragTimer()
+		-- 게이지를 드래그 중인 타일 위로 옮긴다.
+		-- 🔴 타이머와 타일이 **`PuzzleBoard`의 형제**(같은 앵커·피벗)라서 anchoredPosition을
+		--    그대로 복사하면 정확히 겹친다. 부모가 달라지면 이 가정이 깨진다.
+		if not isvalid(self.DragTimerRoot) then return end
+		if not isvalid(self.CurrentDragPuzzle) then return end
+		self.DragTimerRoot.UITransformComponent.anchoredPosition =
+			self.CurrentDragPuzzle.UITransformComponent.anchoredPosition
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		-- 드래그 제한 시간(2026-09-07). 손을 놓지 않고 붙잡고 있는 것으로 턴을 무한정
+		-- 끌 수 있었다. 시간이 다 되면 **손을 뗀 것과 똑같이** 처리한다 —
+		-- 스냅 + 턴 종료까지 `PuzzleController:FinishDrag`가 한 곳에서 담당한다.
+		if self._T.dragElapsed == nil then return end
+		if not isvalid(self.CurrentDragPuzzle) then
+			self._T.dragElapsed = nil
+			self:_ShowDragTimer(nil)
+			return
+		end
+		local limit = self.DragTimeLimit or 0
+		if limit <= 0 then return end
+
+		self._T.dragElapsed = self._T.dragElapsed + delta
+		local remain = limit - self._T.dragElapsed
+		self:_ShowDragTimer(remain)
+		if remain <= 0 then
+			local puzzle = self.CurrentDragPuzzle
+			log("[PuzzleLogic] 드래그 제한 시간 초과 — 강제 종료")
+			-- ⚠️ `FinishDrag`가 맨 앞에서 `EndDrag()`를 부르므로 여기서 따로 정리하지 않는다.
+			--    (정리 후 부르면 `wasDragging` 판정이 false가 되어 턴이 안 넘어간다)
+			if puzzle.PuzzleController ~= nil then
+				puzzle.PuzzleController:FinishDrag()
+			else
+				self:EndDrag()
+			end
+		end
+	end
+
+	method table FindClosestPuzzle(Entity targetPuzzle)
+		-- UI anchoredPosition 기준으로 가장 가까운 타일 탐색
+		local myPos = targetPuzzle.UITransformComponent.anchoredPosition
+		local closestPuzzle = nil
+		local closestDistance = math.huge
+		
+		local pb = self.PuzzleBoard.PuzzleBoard
+		for y = 1, pb.BoardRow do
+			for x = 1, pb.BoardColumn do
+				local other = pb.Puzzles[y][x]
+				if other ~= targetPuzzle and other ~= nil then
+					local otherPos = other.UITransformComponent.anchoredPosition
+					local distance = Vector2.Distance(myPos, otherPos)
+					if distance < closestDistance then
+						closestDistance = distance
+						closestPuzzle = other
+					end
+				end
+			end
+		end
+		
+		return {Puzzle = closestPuzzle, Distance = closestDistance}
+	end
+
+	method void StartResolve()
+		self.MatchResult = {TotalComboCount = 0, MatchGroups = {}}
+		self._T.comboDisplayCount = 0
+		self.PuzzleBoard.PuzzleBoard:ResetTurnPitch()
+		self:ResolveBoard()
+	end
+
+	method void ResolveBoard()
+		local match = self.PuzzleBoard.PuzzleBoard:CheckMatch()
+		if #match == 0 then
+			self:OnResolveFinished()
+			return
+		end
+		
+		self.MatchResult.TotalComboCount = self.MatchResult.TotalComboCount + #match
+		for _, group in ipairs(match) do
+			table.insert(self.MatchResult.MatchGroups, group)
+		end
+		
+		self.PuzzleBoard.PuzzleBoard:RemoveMatchedPuzzle(match,
+			function()
+				self.PuzzleBoard.PuzzleBoard:DropPuzzle(
+					function()
+						self.PuzzleBoard.PuzzleBoard:FillPuzzle(
+							function()
+								self:ResolveBoard()
+							end)
+					end)
+			end,
+			function()
+				self._T.comboDisplayCount = (self._T.comboDisplayCount or 0) + 1
+				if isvalid(self.ComboDisplay) then
+					self.ComboDisplay:Play(self._T.comboDisplayCount)
+				end
+			end)
+	end
+
+	method void OnResolveFinished()
+		-- 캐스케이드가 끝났다 = 지금 떠 있는 게 **최종 콤보**다. 공격 연출이 끝날 때까지 붙잡아 둔다
+		-- (2026-09-07 사용자 요청). 지우는 쪽은 `TurnManager:StartEnemyTurn` 한 곳이다.
+		self:HoldCombo()
+		self.BattleManager:ExecutePlayerAttack(self.MatchResult)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void HoldCombo()
+		-- 최종 콤보 숫자를 페이드아웃 없이 유지시킨다.
+		if isvalid(self.ComboDisplay) then self.ComboDisplay:Hold() end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void HideCombo()
+		-- 콤보 표시를 즉시 지운다. 몬스터 턴 시작·전투 종료에서 호출한다.
+		if isvalid(self.ComboDisplay) then self.ComboDisplay:Hide() end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void EnhanceRandomPuzzles(number probability)
+		self.PuzzleBoard.PuzzleBoard:EnhanceRandomPuzzles(probability)
+	end
+
+end
+

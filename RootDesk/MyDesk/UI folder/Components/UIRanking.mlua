@@ -1,0 +1,18 @@
+@Component
+script UIRanking extends Component
+
+	@EventSender("Self")
+	handler HandleButtonClickEvent(ButtonClickEvent event)
+		--------------- Native Event Sender Info ----------------
+		-- Sender: ButtonComponent
+		-- Space: Client
+		---------------------------------------------------------
+
+		-- Parameters
+		-- local Entity = event.Entity
+		---------------------------------------------------------
+		-- 로비 RightAside/Inventory 버튼. 인벤토리 대신 랭킹을 연다.
+		_RankingUI:Open()
+	end
+
+end

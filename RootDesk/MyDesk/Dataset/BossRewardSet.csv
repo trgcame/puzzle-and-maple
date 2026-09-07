@@ -1,0 +1,11 @@
+﻿RewardId,Type,Min,Max,Ticket
+phase1,phase,1,1,1
+phase2,phase,2,2,1
+phase3,phase,3,3,1
+rank1,rank,1,1,10
+rank2,rank,2,2,8
+rank3,rank,3,3,6
+rank4,rank,4,10,4
+rank5,rank,11,50,3
+rank6,rank,51,200,2
+rank7,rank,201,0,1

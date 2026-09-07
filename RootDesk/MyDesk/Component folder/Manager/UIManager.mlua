@@ -1,0 +1,193 @@
+@Component
+script UIManager extends Component
+
+	property Entity LobbyPanel = "e26abd39-5bd9-4da8-84b7-14d4f32cad4c"
+
+	property Entity DifficultPanel = "1c022420-5561-4454-85a1-7d84899fca43"
+
+	property Entity BattlePanel = "ba1c053c-5eff-4cb5-b091-bc237f51878a"
+
+	property Entity SceneTransition = "b8bdbabd-1440-45c0-86c7-c32d0521ea40"
+
+	property number TransitionDuration = 4
+
+	property string BattleBGMRUID = "00ae4af8800c4e2587cc3118c8b88beb"
+
+	property string LobbyBGMRUID = "022d0be8aacf4cb19851c11eeebccb96"
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		self._T.navStack = {}
+		self:ShowLobby()
+	end
+
+	method void _ApplyPanel(string panelName)
+		-- 패널 이름에 따라 실제 Enable 전환 (스택 조작 없이 순수 표시만)
+		self.LobbyPanel.Enable     = (panelName == "lobby")
+		self.DifficultPanel.Enable = (panelName == "difficulty")
+		self.BattlePanel.Enable    = (panelName == "battle")
+		self._T.currentPanel = panelName
+	end
+
+	method void ShowLobby()
+		self._T.navStack = {}
+		if isvalid(self.SceneTransition) then self.SceneTransition.Enable = false end
+		-- 🔴 스테이지 진입 창을 닫는다. `UIStagePanelToggle`은 버튼으로 **열기만** 하고
+		--    닫는 경로가 없어서, 창을 연 채 게임을 시작하면 클리어 후 로비로 돌아와도
+		--    그대로 열려 있었다(2026-09-07 사용자 제보). 로비 복귀는 클리어·패배·보스가
+		--    전부 이 메서드를 지나므로 **여기가 단일 관문**이다.
+		if isvalid(self.LobbyPanel) then
+			local stagePanel = self.LobbyPanel:GetChildByName("Stage", false)
+			if isvalid(stagePanel) then stagePanel.Enable = false end
+		end
+		if self.LobbyBGMRUID ~= nil and self.LobbyBGMRUID ~= "" then
+			_SoundService:PlayBGM(self.LobbyBGMRUID, 1.0)
+		end
+		self:_ApplyPanel("lobby")
+	end
+
+	method void ShowDifficulty()
+		table.insert(self._T.navStack, self._T.currentPanel or "lobby")
+		self:_ApplyPanel("difficulty")
+	end
+
+	method void GoBack()
+		-- 인벤토리가 열려있으면 먼저 닫기
+		if _HeroInventoryUI:IsOpen() then
+			_HeroInventoryUI:Close()
+			return
+		end
+		if #self._T.navStack == 0 then return end
+		local prev = table.remove(self._T.navStack)
+		self:_ApplyPanel(prev)
+	end
+
+	method void HideBattle()
+		self.BattlePanel.Enable = false
+	end
+
+	method void _ShowBattleImmediate()
+		self.LobbyPanel.Enable = false
+		self.DifficultPanel.Enable = false
+		self.BattlePanel.Enable = true
+	end
+
+	method void ShowBattle()
+		-- 이미 배틀 중이면 (다음 층) BGM·transition 없이 패스
+		if self.BattlePanel.Enable then
+			self._T.currentPanel = "battle"
+			return
+		end
+		if self.BattleBGMRUID ~= nil and self.BattleBGMRUID ~= "" then
+			_SoundService:PlayBGM(self.BattleBGMRUID, 1.0)
+		end
+		table.insert(self._T.navStack, self._T.currentPanel or "lobby")
+		if isvalid(self.SceneTransition) then
+			-- FadeOut·BossTransition은 끄고 Transition만 켠 뒤 그룹 활성화
+			local fadeOut        = self.SceneTransition:GetChildByName("FadeOut", true)
+			local transition     = self.SceneTransition:GetChildByName("Transition", true)
+			local bossTransition = self.SceneTransition:GetChildByName("BossTransition", true)
+			if isvalid(fadeOut)        then fadeOut.Enable        = false end
+			if isvalid(bossTransition) then bossTransition.Enable = false end
+			if isvalid(transition)     then transition.Enable     = true end
+			self.SceneTransition.Enable = true
+			-- 1초 후 BattleGroup 켬 (전환 패널 뒤에서 준비)
+			_TimerService:SetTimerOnce(function()
+				self.BattlePanel.Enable = true
+				self._T.currentPanel = "battle"
+			end, 1.0)
+			local dur = self.TransitionDuration
+			_TimerService:SetTimerOnce(function()
+				self.SceneTransition.Enable = false
+				self.LobbyPanel.Enable = false
+				self.DifficultPanel.Enable = false
+			end, dur)
+		else
+			self:_ShowBattleImmediate()
+		end
+	end
+
+	method void ShowBossBattle()
+		if self.BattlePanel.Enable then
+			self._T.currentPanel = "battle"
+			return
+		end
+		if self.BattleBGMRUID ~= nil and self.BattleBGMRUID ~= "" then
+			_SoundService:PlayBGM(self.BattleBGMRUID, 1.0)
+		end
+		table.insert(self._T.navStack, self._T.currentPanel or "lobby")
+		if isvalid(self.SceneTransition) then
+			local fadeOut        = self.SceneTransition:GetChildByName("FadeOut", true)
+			local transition     = self.SceneTransition:GetChildByName("Transition", true)
+			local bossTransition = self.SceneTransition:GetChildByName("BossTransition", true)
+			if isvalid(fadeOut)        then fadeOut.Enable        = false end
+			if isvalid(transition)     then transition.Enable     = false end
+			if isvalid(bossTransition) then
+				local spr = bossTransition.SpriteGUIRendererComponent
+				if spr ~= nil then spr.AnimClipPlayType = SpriteAnimClipPlayType.Onetime end
+				bossTransition.Enable = true
+			end
+			self.SceneTransition.Enable = true
+			_TimerService:SetTimerOnce(function()
+				self.BattlePanel.Enable = true
+				self._T.currentPanel = "battle"
+			end, 3.0)
+			-- 애니메이션 종료 이벤트로 전환 패널 끄기
+			if isvalid(bossTransition) then
+				local bossAnimHandler
+				bossAnimHandler = bossTransition:ConnectEvent(SpriteGUIAnimPlayerEndEvent, function(event)
+					bossTransition:DisconnectEvent(SpriteGUIAnimPlayerEndEvent, bossAnimHandler)
+					self.SceneTransition.Enable = false
+					self.LobbyPanel.Enable = false
+					self.DifficultPanel.Enable = false
+				end)
+			else
+				-- BossTransition 엔티티가 없으면 TransitionDuration 폴백
+				local dur = self.TransitionDuration
+				_TimerService:SetTimerOnce(function()
+					self.SceneTransition.Enable = false
+					self.LobbyPanel.Enable = false
+					self.DifficultPanel.Enable = false
+				end, dur)
+			end
+		else
+			self:_ShowBattleImmediate()
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowFadeOutToLobby()
+		if not isvalid(self.SceneTransition) then
+			self:ShowLobby()
+			return
+		end
+		local fadeOut = self.SceneTransition:GetChildByName("FadeOut", true)
+		local transition = self.SceneTransition:GetChildByName("Transition", true)
+		if not isvalid(fadeOut) then
+			self:ShowLobby()
+			return
+		end
+		local spr = fadeOut.SpriteGUIRendererComponent
+		if spr == nil then
+			self:ShowLobby()
+			return
+		end
+		if isvalid(transition) then transition.Enable = false end
+		spr:SetAlpha(0)
+		fadeOut.Enable = true
+		self.SceneTransition.Enable = true
+		local step = 0
+		local totalSteps = 45
+		-- FadeOut: 알파 0→1 (화면 어두워짐)
+		self._T.fadeTimer = _TimerService:SetTimerRepeat(function()
+			step += 1
+			spr:SetAlpha(math.min(step / totalSteps, 1))
+			if step >= totalSteps then
+				_TimerService:ClearTimer(self._T.fadeTimer)
+				self._T.fadeTimer = nil
+				self:ShowLobby()
+			end
+		end, 1 / 30)
+	end
+
+end

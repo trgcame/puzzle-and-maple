@@ -1,0 +1,24 @@
+@Component
+script UIEnhance extends Component
+
+	@EventSender("Self")
+	handler HandleButtonClickEvent(ButtonClickEvent event)
+		--------------- Native Event Sender Info ----------------
+		-- Sender: ButtonComponent
+		-- Space: Client
+		---------------------------------------------------------
+		
+		-- Parameters
+		-- local Entity = event.Entity
+		---------------------------------------------------------
+		-- 스타포스 강화 버튼 → 전용 강화 화면을 연다.
+		-- ⚠️ 예전에는 `_HeroInventoryUI:OnClickEnhance()`를 불렀는데, 2026-09-05에 인벤토리 상세의
+		--    강화 UI를 걷어내면서 **그 메서드와 부착 대상 버튼(`btnEnhance`)이 함께 사라졌다.**
+		--    호출만 남아 빌드에 `[LIA-1115] UnresolvedFunction`이 계속 떴다.
+		--    강화 실행 경로는 이제 `EnhanceUI` 전용 패널 하나뿐이므로 그쪽으로 연결한다.
+		--    (파일 자체 삭제는 Phase 6에서 — 스크립트 삭제 직후 Maker 저장이 컴포넌트를
+		--     전량 날린 전례가 있어 백업과 함께 처리한다. As-built 상시 이슈 참조)
+		_EnhanceUI:Open()
+	end
+
+end

@@ -1,0 +1,21 @@
+@Component
+script UIShopClose extends Component
+
+	property Entity ShopPanel = "b02c279e-a351-4c17-ab87-2eb768f895bb"
+
+	@EventSender("Self")
+	handler HandleButtonClickEvent(ButtonClickEvent event)
+		--------------- Native Event Sender Info ----------------
+		-- Sender: ButtonComponent
+		-- Space: Client
+		---------------------------------------------------------
+		-- 상점(가챠) 화면의 뒤로가기. 끄기만 한다 — 토글이 아니다.
+		if not isvalid(self.ShopPanel) then
+			log_warning("[UIShopClose] ShopPanel이 연결되지 않았습니다.")
+			return
+		end
+		self.ShopPanel.Enable = false
+		log("[UIShopClose] 상점(가챠) 패널 닫기")
+	end
+
+end

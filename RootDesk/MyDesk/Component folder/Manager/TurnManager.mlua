@@ -1,0 +1,46 @@
+@Component
+script TurnManager extends Component
+
+	property string CurrentTurn = "Player"
+
+	property MonsterManager MonsterManager = "e6134141-3e3a-4af2-afd3-5ff8ee51c719"
+
+	property BattleManager BattleManager = "19ce6a28-58bd-4542-92b8-c265bc6eda48"
+
+	property PlayerManager PlayerManager = "df8d8de0-9c09-4f5b-b5f6-5dc345255206"
+
+	method void StartBattle()
+		self.CurrentTurn = "Player"
+		self:StartPlayerTurn()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StartPlayerTurn()
+		self.CurrentTurn = "Player"
+		self.BattleManager:ApplyPassiveSkills()
+	end
+
+	method void EndPlayerTurn()
+		self.CurrentTurn = "Resolving"
+		_PuzzleLogic:StartResolve()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StartEnemyTurn()
+		self.CurrentTurn = "Enemy"
+		-- 몬스터 공격이 시작되면 붙잡아 둔 최종 콤보를 지운다(2026-09-07 사용자 요청).
+		-- ⚠️ 승리·패배는 적 턴이 오지 않으므로 `BattleManager:OnWin`/`OnLose`에서도 따로 지운다.
+		_PuzzleLogic:HideCombo()
+		self.BattleManager:ExecuteEnemyAttack()
+	end
+
+	method void EndEnemyTurn()
+		self:StartPlayerTurn()
+	end
+
+	method boolean IsPlayerTurn()
+		return self.CurrentTurn == "Player"
+	end
+
+end
+

@@ -1,0 +1,39 @@
+{
+  "Id": "",
+  "GameId": "",
+  "EntryKey": "material://8c403b99-5a23-483d-a660-7eef5957daff",
+  "ContentType": "x-mod/material",
+  "Content": "",
+  "Usage": 0,
+  "UsePublish": 1,
+  "UseService": 0,
+  "CoreVersion": "26.5.0.0",
+  "StudioVersion": "0.1.0.0",
+  "DynamicLoading": 0,
+  "ContentProto": {
+    "Use": "Json",
+    "Json": {
+      "name": "EnchantPuzzle",
+      "id": "8c403b99-5a23-483d-a660-7eef5957daff",
+      "shadertype": "ConcentrationLine",
+      "CenterPos": {
+        "x": 0.5,
+        "y": 0.5
+      },
+      "EffectMax": 0.5,
+      "EffectMin": 0.25,
+      "LineColor": {
+        "r": 1.0,
+        "g": 0.97265625,
+        "b": 0.0,
+        "a": 1.0
+      },
+      "LineThickness": 0.03,
+      "LitMode": 0,
+      "TimeOffset": 1.0,
+      "TimeScale": 0.2,
+      "IsUIMaterial": false,
+      "RequiresUIStencilStateChange": false
+    }
+  }
+}

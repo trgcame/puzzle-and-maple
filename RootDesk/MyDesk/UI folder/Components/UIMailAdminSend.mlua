@@ -1,0 +1,13 @@
+@Component
+script UIMailAdminSend extends Component
+
+	@EventSender("Self")
+	handler HandleButtonClickEvent(ButtonClickEvent event)
+		--------------- Native Event Sender Info ----------------
+		-- Sender: ButtonComponent
+		-- Space: Client
+		---------------------------------------------------------
+		_MailAdminUI:OnClickSend()
+	end
+
+end

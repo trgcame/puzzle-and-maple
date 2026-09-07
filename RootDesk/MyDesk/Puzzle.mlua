@@ -1,0 +1,80 @@
+@Component
+script Puzzle extends Component
+
+	property string SpriteRUID = ""
+
+	property string ElementType = ""
+
+	property Entity Board = "9e1017be-9c29-4a50-b288-cbeb2b50a0c8"
+
+	property integer Row = 0
+
+	property integer Column = 0
+
+	property boolean IsEnhanced = false
+
+	property number AnimPhase = 0
+
+	property boolean IsAnimating = false
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		self._T.enchantMatId = nil
+		local renderer = self.Entity.SpriteGUIRendererComponent
+		if renderer == nil then return end
+		self._T.defaultMatId = renderer.MaterialId or ""
+	end
+
+	method void OnUpdate(number delta)
+		
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetEnhanced(boolean enhanced)
+		self.IsEnhanced = enhanced
+		self.IsAnimating = false
+		local renderer = self.Entity.SpriteGUIRendererComponent
+		if renderer == nil then return end
+		renderer.Color = Color(1, 1, 1, 1)
+		if enhanced then
+			if self._T.enchantMatId == nil then
+				self._T.enchantMatId = _EntryService:GetMaterialIdByName("EnchantPuzzle")
+			end
+			if self._T.enchantMatId ~= nil and self._T.enchantMatId ~= "" then
+				renderer:ChangeMaterial(self._T.enchantMatId)
+			end
+		else
+			self.AnimPhase = 0
+			renderer:ChangeMaterial(self._T.defaultMatId or "")
+		end
+	end
+
+	method void MoveToGridPosition()
+		-- UI anchoredPosition으로 그리드 위치 이동
+		local board = self.Board
+		local pos = board.PuzzleBoard:GetUIPosition(self.Column, self.Row)
+		self.Entity.UITransformComponent.anchoredPosition = pos
+	end
+
+	method void SnapToGridOrSwap()
+		-- 현재 UI 위치에서 가장 가까운 그리드 셀로 스냅
+		local currentPos = self.Entity.UITransformComponent.anchoredPosition
+		local gridPos = self.Board.PuzzleBoard:GetGridFromUIPosition(currentPos)
+		local row = gridPos.x
+		local column = gridPos.y
+		
+		local target = self.Board.PuzzleBoard.Puzzles[row][column]
+		local puzzle = self.Entity.Puzzle
+		
+		if target == nil then
+			self.Board.PuzzleBoard.Puzzles[puzzle.Row][puzzle.Column] = nil
+			self.Board.PuzzleBoard.Puzzles[row][column] = self.Entity
+			puzzle.Row = row
+			puzzle.Column = column
+			self:MoveToGridPosition()
+		else
+			self.Board.PuzzleBoard:SwapPuzzle(self.Entity, target)
+		end
+	end
+
+end

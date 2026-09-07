@@ -1,0 +1,26 @@
+﻿SkillId,HeroId,StarLevel,SkillName,TriggerCount,TriggerCondition,AtkCoeff,MatchCoeff,EnhanceCoeff,ComboCoeff,VisualType,IconRUID,SkillDescription
+warrior_s0,hero_warrior,0,슬래시 블러스트,3,always,1.0,0.25,0.10,0.25,warrior_slash,618f1cc76b374236b5d4b97e72411ed0,전방 1명에게 물리 피해를 입힙니다.
+warrior_s1,hero_warrior,1,콤보 어택,3,always,1.0,0.25,0.10,0.25,warrior_combo,8bf9d8a9b5c54755ae6748206cc51de7,콤보마다 공격력 25% 증가.
+warrior_s2,hero_warrior,2,스카링 소드,3,combo_gte:3,1.0,0.25,0.10,0.25,warrior_debuff,d00628e93fe04ba3a5c0d2a453d40eaa,3콤보 이상 시 적 공격력 -30% (1턴).
+warrior_s3,hero_warrior,3,인사이징,3,combo_gte:5,1.0,0.25,0.10,0.25,warrior_fixed,01f68951662b458ea753118b4f99dd7e,3콤보 이상 시 공격을 고정 피해로 전환합니다.
+warrior_s4,hero_warrior,4,콤보 데스폴트,3,combo_gte:7,1.0,0.25,0.10,0.25,warrior_aoe,4df8fa30bd6e4c9994b3378b122c8d6f,3콤보 이상 시 전체 적에게 물리 피해를 입힙니다.
+bishop_s0,hero_bishop,0,에너지 볼트,3,always,1.0,0.25,0.10,0.25,bishop_bolt,2d2fd410a67e4e15a3cd53e7d6c100b2,전체 적에게 마법 피해를 입힙니다.
+bishop_s1,hero_bishop,1,힐,3,always,4.0,0.25,0.10,0.25,bishop_heal,1d9b15c6ccc14571916bb0de8bdb5756,체력이 가장 낮은 아군을 회복합니다.
+bishop_s2,hero_bishop,2,홀리 심볼,0,passive,0,0,0,0,,40ba73d4d15e4d3e963f0de754e87b1c,매 턴 퍼즐 10% 확률로 강화.
+bishop_s3,hero_bishop,3,제네시스,5,match_gte:5,1.0,0.25,0.10,0.25,bishop_genesis,7fe1a84304e647a1acb7b984a4cf2e9b,5매칭 이상 시 전체 적에게 마법 피해를 입힙니다.
+bishop_s4,hero_bishop,4,프레이,7,match_gte:7,0,0,0,0,bishop_pray,37545a9c04df431a8bff3581b3695b65,7매칭 이상 시 파티 공격력 +33%·받는 피해 -33% (1턴).
+marksman_s0,hero_marksman,0,애로우 블로우,3,always,1.0,0.25,0.10,0.25,marksman_arrow,f62b353e3f704eb097e427b7fc97980e,전방 1명에게 물리 피해를 입힙니다.
+marksman_s1,hero_marksman,1,피어싱,3,always,1.0,0.25,0.10,0.25,marksman_pierce,da2013cbba2e41949bb43ae95d8cff72,대상이 받는 피해 +30% (1턴).
+marksman_s2,hero_marksman,2,인핸스 피어싱,3,always,1.0,0.25,0.10,0.25,marksman_pierce2,90a6d2de42b846de832d96bb9e080f4d,대상이 받는 피해 +30% 추가 (1턴).
+marksman_s3,hero_marksman,3,볼스 아이,3,combo_gte:3,1.0,0.25,0.10,0.25,marksman_bulls_eye,29b753d46a1d4780aff9dbe0a0f9b472,3콤보 이상 시 최종 데미지 2배.
+marksman_s4,hero_marksman,4,트루 스나이핑,3,combo_gte:5,1.0,0.25,0.10,0.25,marksman_snipe,f940c35ae6c7478692338475e401530e,5콤보 이상 시 공격을 고정 피해로 전환합니다.
+shadower_s0,hero_shadower,0,더블 스텝,3,always,1.0,0.25,0.10,0.25,shadower_slash,09b8fc13216341a5ae4ecb8e91a69a65,전방 1명에게 물리 피해를 입힙니다.
+shadower_s1,hero_shadower,1,스틸,3,always,1.0,0.25,0.10,0.25,shadower_steal,0cdc58f4336044e58e07afcd112727d0,적 공격력 -20% 탈취·파티 공격력 +20% (1턴).
+shadower_s2,hero_shadower,2,쉐도우 파트너,3,combo_gte:3,1.0,0.25,0.10,0.25,shadower_partner,ce518eeb58db4adb9dafdc58c328a5e8,3콤보 이상 시 최종 데미지 2배.
+shadower_s3,hero_shadower,3,암살,3,always,1.0,0.25,0.10,0.25,shadower_assassin,54b26ae2367541ff8c6a209bbbc14d67,뒷 라인 1명에게 물리 피해를 입힙니다.
+shadower_s4,hero_shadower,4,멸귀참영진,5,match_gte:5,1.0,0.25,0.10,0.25,shadower_final,703755eb69324475a32aeb0eb777567e,5매칭 이상 시 뒷 라인 1명에게 고정 피해를 입힙니다.
+viper_s0,hero_viper,0,써머솔트 킥,3,always,1.0,0.25,0.10,0.25,viper_kick,eb7c5b7342bd4282840aa609ffa3362e,전방 1명에게 물리 피해를 입힙니다.
+viper_s1,hero_viper,1,씨 서펜트 버스트,3,always,1.0,0.25,0.10,0.25,viper_burst,4e26bd1ff9a6468b98f2042fb70b10bc,전방 3명에게 물리 피해를 입힙니다.
+viper_s2,hero_viper,2,럭키 다이스,3,always,1.0,0.25,0.10,0.25,viper_dice,83135f7923b846ae898c775bbe96bb81,매칭 개수에 따라 공격력 증가 (매칭당 +25%).
+viper_s3,hero_viper,3,바이퍼지션,3,always,1.0,0.25,0.10,0.25,viper_section,b99b4a02f83f4dbc9036df9bcfa8c6c9,최종 데미지 1.5배 및 공격력 30% 증가.
+viper_s4,hero_viper,4,하울링 피스트,5,match_gte:5,1.0,0.25,0.10,0.25,viper_howling,94eb2b7cf95e4210991b8f87e0fc8776,5매칭 이상 시 전체 적에게 물리 피해를 입힙니다.

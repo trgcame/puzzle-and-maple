@@ -1,0 +1,5 @@
+﻿BannerId,RewardType,Rarity,Weight,Amount
+standard,hero,SSR,1,0
+standard,hero,SR,10,0
+standard,meso,,60,34000
+standard,stone,,29,20

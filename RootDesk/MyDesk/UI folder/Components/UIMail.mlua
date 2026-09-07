@@ -1,0 +1,24 @@
+@Component
+script UIMail extends Component
+
+	@EventSender("Self")
+	handler HandleButtonClickEvent(ButtonClickEvent event)
+		--------------- Native Event Sender Info ----------------
+		-- Sender: ButtonComponent
+		-- Space: Client
+		---------------------------------------------------------
+		-- 로비 `RightAside/Mail` 버튼.
+		-- 진입점 버튼은 사용자가 미리 만들어 두었고(ButtonComponent 보유), 이 글루만 얹었다.
+		--
+		-- **운영자면 발송 화면, 일반 유저면 우편함**으로 갈라진다.
+		-- 진입점을 따로 두지 않아 일반 유저에게는 발송 화면의 존재가 드러나지 않는다.
+		-- ⚠️ 이 분기는 **어느 화면을 띄울지 고르는 것뿐**이다. 실제 발송 권한은
+		--    서버(`MailManager:RequestGMSend`)가 `senderUserId`로 다시 판정한다.
+		if _MailManager:IsAdmin() then
+			_MailAdminUI:Open()
+		else
+			_MailUI:Open()
+		end
+	end
+
+end

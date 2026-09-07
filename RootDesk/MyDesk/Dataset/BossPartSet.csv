@@ -1,0 +1,4 @@
+﻿BossId,PartIndex,SpriteRUID,PosX,PosY,Width,Height,LocalX,LocalY,Scale
+seasonboss_1,0,5876ee61ed4f4162b04d8c3b6f3cf1e0,0,0,350,250,-50,-120,0.5
+seasonboss_1,1,cab5fec6e5ba430ab3fef77446698d2a,-152.7688,-77.2686,150,150,100,-40,0.5
+seasonboss_1,2,53685acae4624460bf9e27ba39e4d481,120,-77.2682,150,150,-160,-40,0.5

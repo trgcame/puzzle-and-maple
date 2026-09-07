@@ -1,0 +1,432 @@
+@Logic
+script MailManager extends Logic
+
+	-- ─────────────────────────────────────────────────────────────
+	-- 우편 시스템 (자체 구현 — 2026-09-06)
+	--
+	-- 공식 `mail-package`를 먼저 넣어 봤으나 이 CoreVersion(26.7.0.0)에서 컴파일되지 않았다:
+	--   · `Mail`/`MailBase`/`ItemBase`(@Struct) 타입 미해석 `[LEA-1118]`
+	--   · Struct·Event를 ExecSpace 넘는 RPC 인자로 써서 `[LEA-4002]`
+	--   · `PlayerMail`이 `@Component`라 엔티티 부착(= Maker 작업)까지 필요
+	-- 랭킹 때와 같은 판단으로 자체 구현했다. **여기는 `@Logic`이라 부착이 필요 없다.**
+	--
+	-- 저장 구조
+	--   개인함  UserDataStorage(userId) 키 `mail`
+	--           { mails = [...], gidx = 마지막으로 받아온 전체우편 인덱스 }
+	--   전체함  GlobalDataStorage("mail_global")
+	--           키 `index` = 현재 최대 인덱스 · 키 `m<N>` = 전체우편 1건
+	--
+	-- 전체 우편은 **접속 시 개인함으로 복사**한다(시즌 정산과 같은 지연 처리).
+	-- MSW에는 서버 크론이 없어 오프라인 유저에게 미리 넣어둘 방법이 없기 때문이다.
+	--
+	-- ⚠️ 저장은 `_HttpService:JSONEncode`를 쓴다. `_UtilLogic:TableToString`은
+	--    **중첩 테이블을 조용히 버린다**(가챠에서 이미 밟은 함정) — 우편은 배열이라 치명적이다.
+	-- ─────────────────────────────────────────────────────────────
+
+	property integer MaxMailSlots = 50
+
+	property string GlobalStorageName = "mail_global"
+
+	-- 운영자 userId 목록(쉼표 구분). Maker에서 값만 고치면 되고 코드 수정은 필요 없다.
+	-- ⚠️ **비우면 아무도 운영자가 아니다** — 발송이 전부 막힌다(안전한 기본값).
+	-- 🔴 여기에 실제 userId 를 적어 커밋하지 말 것 — 개인 식별자이자 권한 게이트다.
+	--    운영자 기능을 쓰려면 Maker 의 MailManager 인스펙터에서 값을 넣는다.
+	property string AdminUserIds = ""
+
+	method void OnBeginPlay()
+		if self:IsServer() then
+			self._T.cache = {}   -- userId -> { mails = {...}, gidx = n }
+		else
+			self._T.mails = {}
+			self._T.isAdmin = false
+			-- 우편함 버튼이 눌렸을 때 어느 화면을 띄울지 미리 알아둔다.
+			self:RequestIsAdmin()
+		end
+	end
+
+	-- ── 서버: 개인함 로드/저장 ────────────────────────────────
+
+	@ExecSpace("ServerOnly")
+	method table _EnsureBox(string userId)
+		if self._T.cache[userId] ~= nil then return self._T.cache[userId] end
+		local storage      = _DataStorageService:GetUserDataStorage(userId)
+		local errCode, raw = storage:GetAndWait("mail")
+		local box = nil
+		if errCode == 0 and raw ~= nil and raw ~= "" then
+			box = _HttpService:JSONDecode(raw)
+		end
+		-- ⚠️ `mails`가 비어 있다고 **`gidx`까지 0으로 되돌리면 안 된다.**
+		--    되돌리면 이미 받은 전체 우편을 처음부터 다시 끌어와 지운 우편이 되살아난다.
+		--    그래서 통째로 초기화하지 않고 빠진 필드만 채운다.
+		if box == nil then box = {} end
+		if box.mails == nil then box.mails = {} end
+		box.gidx = tonumber(box.gidx) or 0
+		self._T.cache[userId] = box
+		return box
+	end
+
+	@ExecSpace("ServerOnly")
+	method void _SaveBox(string userId)
+		local box = self._T.cache[userId]
+		if box == nil then return end
+		local storage = _DataStorageService:GetUserDataStorage(userId)
+		-- 🔴 **빈 Lua 테이블을 통째로 JSONEncode하면 안 된다.** 배열인지 객체인지 판단할 수 없어
+		--    `[LEA-3001] LuaTableToJsonType.UnknownType`으로 죽는다 — 그러면 **저장이 통째로 실패**한다.
+		--    (수령분을 전부 삭제해 `mails`가 비었을 때 실제로 터졌다. 화면은 갱신되는데
+		--     DataStorage에는 안 써져서 재접속하면 우편이 되살아나는 형태였다.)
+		--    그래서 목록만 따로 인코딩하고 비면 `"[]"` 리터럴을 직접 넣어 문자열을 조립한다.
+		local mailsJson = "[]"
+		if #(box.mails or {}) > 0 then mailsJson = _HttpService:JSONEncode(box.mails) end
+		local raw = '{"gidx":' .. tostring(math.floor(box.gidx or 0)) .. ',"mails":' .. mailsJson .. '}'
+		storage:SetAsync("mail", raw, function(code, key)
+			if code ~= 0 then
+				log_warning("[Mail] 개인함 저장 실패 userId=" .. tostring(userId))
+			end
+		end)
+	end
+
+	-- ── 서버: 전체 우편 수신 ──────────────────────────────────
+
+	@ExecSpace("ServerOnly")
+	method integer _GlobalIndex()
+		local g = _DataStorageService:GetGlobalDataStorage(self.GlobalStorageName)
+		if g == nil then return 0 end
+		local code, raw = g:GetAndWait("index")
+		if code ~= 0 or raw == nil or raw == "" then return 0 end
+		return tonumber(raw) or 0
+	end
+
+	@ExecSpace("ServerOnly")
+	method void _PullGlobalMails(string userId)
+		-- 아직 안 받은 전체 우편(gidx+1 ~ 현재 인덱스)을 개인함으로 복사한다.
+		local box = self:_EnsureBox(userId)
+		local top = self:_GlobalIndex()
+		if top <= box.gidx then return end
+
+		local g = _DataStorageService:GetGlobalDataStorage(self.GlobalStorageName)
+		if g == nil then return end
+		local now    = os.time()
+		local pulled = 0
+		for i = box.gidx + 1, top do
+			local code, raw = g:GetAndWait("m" .. tostring(i))
+			if code == 0 and raw ~= nil and raw ~= "" then
+				local m = _HttpService:JSONDecode(raw)
+				-- 이미 만료된 전체 우편은 건너뛴다(뒤늦게 접속한 유저에게 죽은 우편을 넣지 않는다).
+				if m ~= nil and (tonumber(m.expireAt) or 0) == 0 or (m ~= nil and tonumber(m.expireAt) > now) then
+					m.id = "g" .. tostring(i)
+					table.insert(box.mails, m)
+					pulled += 1
+				end
+			end
+		end
+		box.gidx = top
+		if pulled > 0 then
+			log("[Mail] 전체 우편 " .. tostring(pulled) .. "통 수신 userId=" .. tostring(userId))
+		end
+		self:_Prune(box)
+		self:_SaveBox(userId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void _Prune(table box)
+		-- 만료된 우편 제거 + 슬롯 상한 초과분은 **오래된 것부터** 버린다.
+		local now  = os.time()
+		local kept = {}
+		for _, m in ipairs(box.mails or {}) do
+			local exp = tonumber(m.expireAt) or 0
+			if exp == 0 or exp > now then table.insert(kept, m) end
+		end
+		while #kept > self.MaxMailSlots do
+			table.remove(kept, 1)
+		end
+		box.mails = kept
+	end
+
+	-- ── 클라이언트 요청 ───────────────────────────────────────
+
+	@ExecSpace("Server")
+	method void RequestMailbox()
+		local userId = senderUserId
+		if userId == nil or userId == "" then return end
+		self:_PullGlobalMails(userId)
+		local box = self:_EnsureBox(userId)
+		self:_Prune(box)
+		local json = "[]"
+		if #box.mails > 0 then json = _HttpService:JSONEncode(box.mails) end
+		self:ReceiveMailbox(json, userId)
+	end
+
+	@ExecSpace("Client")
+	method void ReceiveMailbox(string mailsJson)
+		self._T.mails = {}
+		if mailsJson ~= nil and mailsJson ~= "" and mailsJson ~= "[]" then
+			local decoded = _HttpService:JSONDecode(mailsJson)
+			if decoded ~= nil then self._T.mails = decoded end
+		end
+		log("[Mail] 우편함 수신 " .. tostring(#self._T.mails) .. "통")
+		-- 화면이 열려 있으면 바로 다시 그린다. 이름으로 부르는 방식은
+		-- `HeroDataManager:ReceiveStarforceResult` → `_EnhanceUI`와 같은 이 프로젝트의 관례다.
+		if isvalid(_MailUI) then _MailUI:Refresh() end
+	end
+
+	@ExecSpace("ClientOnly")
+	method table GetMails()
+		return self._T.mails or {}
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer GetUnclaimedCount()
+		local n = 0
+		for _, m in ipairs(self._T.mails or {}) do
+			if m.claimed ~= true then n += 1 end
+		end
+		return n
+	end
+
+	@ExecSpace("Server")
+	method void RequestClaim(string mailId)
+		local userId = senderUserId
+		if userId == nil or userId == "" then return end
+		local box = self:_EnsureBox(userId)
+		for _, m in ipairs(box.mails or {}) do
+			if m.id == mailId and m.claimed ~= true then
+				self:_GrantRewards(userId, m)
+				m.claimed = true
+				self:_SaveBox(userId)
+				break
+			end
+		end
+		self:RequestMailboxFor(userId)
+	end
+
+	@ExecSpace("Server")
+	method void RequestClaimAll()
+		local userId = senderUserId
+		if userId == nil or userId == "" then return end
+		local box = self:_EnsureBox(userId)
+		local n = 0
+		for _, m in ipairs(box.mails or {}) do
+			if m.claimed ~= true then
+				self:_GrantRewards(userId, m)
+				m.claimed = true
+				n += 1
+			end
+		end
+		if n > 0 then
+			self:_SaveBox(userId)
+			log("[Mail] 일괄 수령 " .. tostring(n) .. "통 userId=" .. tostring(userId))
+		end
+		self:RequestMailboxFor(userId)
+	end
+
+	@ExecSpace("Server")
+	method void RequestDeleteClaimed()
+		-- **수령한 우편만** 지운다. 미수령분은 남긴다 — 보상을 못 받은 우편이 사라지면 복구할 방법이 없다.
+		-- 판정은 서버가 자기 저장본의 `claimed`로 한다(클라가 보낸 id 목록을 믿지 않는다).
+		local userId = senderUserId
+		if userId == nil or userId == "" then return end
+		local box = self:_EnsureBox(userId)
+		local kept, removed = {}, 0
+		for _, m in ipairs(box.mails or {}) do
+			if m.claimed == true then
+				removed += 1
+			else
+				table.insert(kept, m)
+			end
+		end
+		if removed > 0 then
+			box.mails = kept
+			self:_SaveBox(userId)
+			log("[Mail] 수령분 삭제 " .. tostring(removed) .. "통 userId=" .. tostring(userId))
+		end
+		-- ⚠️ 지운 전체 우편이 다시 들어오지 않는다 — `gidx`가 이미 그 인덱스를 지나 있어
+		--    `_PullGlobalMails`가 재수신하지 않는다.
+		self:ReceiveDeleteResult(removed, userId)
+		self:RequestMailboxFor(userId)
+	end
+
+	@ExecSpace("Client")
+	method void ReceiveDeleteResult(integer removed)
+		if removed > 0 then
+			_UIToast:ShowMessage("수령한 우편 " .. tostring(removed) .. "통을 삭제했습니다.")
+		else
+			_UIToast:ShowMessage("삭제할 우편이 없습니다.")
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer GetClaimedCount()
+		local n = 0
+		for _, m in ipairs(self._T.mails or {}) do
+			if m.claimed == true then n += 1 end
+		end
+		return n
+	end
+
+	@ExecSpace("ServerOnly")
+	method void RequestMailboxFor(string userId)
+		-- 수령 후 최신 목록을 다시 내려보낸다(클라가 따로 요청하지 않아도 갱신되게).
+		local box = self:_EnsureBox(userId)
+		self:_Prune(box)
+		local json = "[]"
+		if #box.mails > 0 then json = _HttpService:JSONEncode(box.mails) end
+		self:ReceiveMailbox(json, userId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void _GrantRewards(string userId, table m)
+		-- ⚠️ `CurrencyManager`는 `@Component`라 전역이 없다. `@Logic`인 `_HeroDataManager`를 타고 간다.
+		local cm = isvalid(_HeroDataManager) and _HeroDataManager.CurrencyManager or nil
+		local gold   = tonumber(m.gold)   or 0
+		local stone  = tonumber(m.stone)  or 0
+		local ticket = tonumber(m.ticket) or 0
+		if cm ~= nil then
+			if gold   > 0 then cm:ServerAdd(userId, "gold",   gold)   end
+			if stone  > 0 then cm:ServerAdd(userId, "stone",  stone)  end
+			if ticket > 0 then cm:ServerAdd(userId, "ticket", ticket) end
+			if gold > 0 or stone > 0 or ticket > 0 then cm:ServerPushToClient(userId) end
+		else
+			log_warning("[Mail] CurrencyManager를 찾을 수 없어 재화 지급 실패")
+		end
+		local heroId = m.heroId or ""
+		if heroId ~= "" and isvalid(_HeroDataManager) then
+			_HeroDataManager:AddHero(userId, heroId)
+		end
+		log("[Mail] 수령 userId=" .. tostring(userId) .. " id=" .. tostring(m.id)
+			.. " gold=" .. tostring(gold) .. " stone=" .. tostring(stone)
+			.. " ticket=" .. tostring(ticket) .. " hero=" .. tostring(heroId))
+	end
+
+	-- ── 운영자 판정 ───────────────────────────────────────────
+	--
+	-- 🔴 **권한은 서버가 판정한다.** 클라이언트가 들고 있는 `isAdmin`은 어느 화면을 띄울지
+	--    고르는 용도일 뿐이고, 실제 발송(`RequestGMSend`)은 **서버에서 다시 검사한다.**
+	--    클라 값만 믿으면 아무나 자기한테 티켓을 보낼 수 있다.
+
+	@ExecSpace("ServerOnly")
+	method boolean _IsAdmin(string userId)
+		if userId == nil or userId == "" then return false end
+		local list = self.AdminUserIds or ""
+		for id in string.gmatch(list, "[^,%s]+") do
+			if id == userId then return true end
+		end
+		return false
+	end
+
+	@ExecSpace("Server")
+	method void RequestIsAdmin()
+		local userId = senderUserId
+		self:ReceiveIsAdmin(self:_IsAdmin(userId), userId)
+	end
+
+	@ExecSpace("Client")
+	method void ReceiveIsAdmin(boolean value)
+		self._T.isAdmin = value
+		log("[Mail] 운영자 여부 = " .. tostring(value))
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsAdmin()
+		return self._T.isAdmin == true
+	end
+
+	@ExecSpace("Server")
+	method void RequestGMSend(string target, string toUserId, string title, string body,
+		integer gold, integer stone, integer ticket, string heroId, integer days)
+		-- ⚠️ 인자는 전부 **평탄한 스칼라**다. Struct·table을 ExecSpace 경계로 넘기면
+		--    `[LEA-4002]`가 난다(공식 mail-package가 이것 때문에 컴파일이 안 됐다).
+		local userId = senderUserId
+		if not self:_IsAdmin(userId) then
+			log_warning("[Mail] 운영자가 아닌 발송 시도 차단 userId=" .. tostring(userId))
+			self:ReceiveGMResult(false, "권한이 없습니다.", userId)
+			return
+		end
+		if title == nil or title == "" then
+			self:ReceiveGMResult(false, "제목을 입력하세요.", userId)
+			return
+		end
+
+		local rewards = { gold = gold, stone = stone, ticket = ticket, heroId = heroId }
+		if target == "all" then
+			local ok = self:GMSendToAll(title, body, rewards, days)
+			self:ReceiveGMResult(ok, ok and "전체 발송 완료" or "전체 발송 실패", userId)
+		else
+			if toUserId == nil or toUserId == "" then
+				self:ReceiveGMResult(false, "받는 userId를 입력하세요.", userId)
+				return
+			end
+			self:GMSendToUser(toUserId, title, body, rewards, days)
+			self:ReceiveGMResult(true, "발송 완료 → " .. tostring(toUserId), userId)
+		end
+	end
+
+	@ExecSpace("Client")
+	method void ReceiveGMResult(boolean ok, string message)
+		if isvalid(_MailAdminUI) then _MailAdminUI:ShowResult(ok, message) end
+		_UIToast:ShowMessage(message)
+	end
+
+	-- ── GM 발송 (운영자용) ────────────────────────────────────
+	-- 호출 방법: Maker Play 중 서버 컨텍스트에서
+	--   _MailManager:GMSendToAll("제목", "본문", {ticket=3}, 7)
+	--   _MailManager:GMSendToUser("<userId>", "제목", "본문", {gold=10000}, 7)
+	-- rewards 키: gold · stone · ticket · heroId
+
+	@ExecSpace("ServerOnly")
+	method table _BuildMail(string title, string body, table rewards, integer retentionDays)
+		local now = os.time()
+		local r   = rewards or {}
+		return {
+			title    = title or "",
+			body     = body  or "",
+			sender   = "운영자",
+			sentAt   = now,
+			expireAt = (retentionDays ~= nil and retentionDays > 0) and (now + retentionDays * 86400) or 0,
+			gold     = tonumber(r.gold)   or 0,
+			stone    = tonumber(r.stone)  or 0,
+			ticket   = tonumber(r.ticket) or 0,
+			heroId   = r.heroId or "",
+			claimed  = false,
+		}
+	end
+
+	@ExecSpace("ServerOnly")
+	method void GMSendToUser(string userId, string title, string body, table rewards, integer retentionDays)
+		if userId == nil or userId == "" then return end
+		local box = self:_EnsureBox(userId)
+		local m   = self:_BuildMail(title, body, rewards, retentionDays)
+		-- 개인 우편 id는 시각 + 통수로 만든다(전체 우편의 `g<N>`과 겹치지 않게 `p` 접두).
+		m.id = "p" .. tostring(m.sentAt) .. "_" .. tostring(#box.mails + 1)
+		table.insert(box.mails, m)
+		self:_Prune(box)
+		self:_SaveBox(userId)
+		log("[Mail] 개인 발송 → " .. tostring(userId) .. " : " .. tostring(title))
+		self:RequestMailboxFor(userId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean GMSendToAll(string title, string body, table rewards, integer retentionDays)
+		local g = _DataStorageService:GetGlobalDataStorage(self.GlobalStorageName)
+		if g == nil then
+			log_error("[Mail] 전체 우편 저장소를 열 수 없습니다")
+			return false
+		end
+		local next = self:_GlobalIndex() + 1
+		local m    = self:_BuildMail(title, body, rewards, retentionDays)
+		local c1 = g:SetAndWait("m" .. tostring(next), _HttpService:JSONEncode(m))
+		if c1 ~= 0 then
+			log_error("[Mail] 전체 우편 본문 저장 실패 code=" .. tostring(c1))
+			return false
+		end
+		-- 본문을 먼저 쓰고 인덱스를 마지막에 올린다. 순서가 반대면 인덱스만 오른 채
+		-- 본문이 없는 구간이 생겨 유저가 빈 우편을 받는다.
+		local c2 = g:SetAndWait("index", tostring(next))
+		if c2 ~= 0 then
+			log_error("[Mail] 전체 우편 인덱스 저장 실패 code=" .. tostring(c2))
+			return false
+		end
+		log("[Mail] 전체 발송 #" .. tostring(next) .. " : " .. tostring(title))
+		return true
+	end
+
+end

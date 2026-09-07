@@ -1,0 +1,853 @@
+@Component
+script SeasonBossManager extends Component
+
+	property BattleManager BattleManager = "19ce6a28-58bd-4542-92b8-c265bc6eda48"
+
+	property UIManager UIManager = "c8f5b5e2-cc2a-470e-a065-b1ef66384101"
+
+	property TurnManager TurnManager = "43e421d6-5bf3-4ec4-bb64-562f3c811a45"
+
+	property PlayerManager PlayerManager = "df8d8de0-9c09-4f5b-b5f6-5dc345255206"
+
+	property Entity BossOverlay = "3b823190-e3a8-4b9b-b2ad-be7f8121b7c7"
+
+	property Entity BossNameTag = "a230f9b4-c853-4fbb-8557-7d3c9a12fe55"
+
+	property Entity PhaseText = "ba8d77eb-449b-4e84-8a7b-03b96ee79b99"
+
+	property Entity BossHpBar = "abf94bf7-8213-4490-8730-01d95efa30d9"
+
+	property Entity Warning = "898ed73e-9f5d-4610-b3c8-b1f9cb17b96c"
+
+	property Entity BossPart0 = "62e76a79-aa3b-42cf-8371-61e422ca9d62"
+
+	property Entity BossPart1 = "ac503e79-9877-4226-ae09-0513ab976f2f"
+
+	property Entity BossPart2 = "1e639239-eb55-4fc2-86ab-ca6deab4bab0"
+
+	property Entity BossPart3 = "3ab65ffa-6385-422c-9631-b53672114f7a"
+
+	property Entity MonsterPartyPanel = "f2395ea3-790e-4925-bc27-f73144e5cb5b"
+
+	property Entity AttemptsText = "58d4b931-581c-4e2a-8ec0-e71bf586111e"
+
+	property Entity TurnText = "8b776aef-2c77-446c-b223-a8ac8a4b39c4"
+
+	property integer MaxDailyAttempts = 3
+
+	-- 시즌 랭킹 보상 우편의 보관 기간(일). 0이면 무기한.
+	-- 시즌이 3일 주기라 그 사이 한 번은 접속해 받을 수 있게 넉넉히 둔다.
+	property integer SeasonMailRetentionDays = 14
+
+	-- 오래 쉬다 온 유저에게 소급 지급할 **최대 시즌 수**.
+	-- 🔴 상한이 필요한 이유: 시즌 1개를 정산할 때마다 그 시즌 보드를 정렬 조회한다(크레딧 1).
+	--    상한이 없으면 신규/장기 미접속 유저 한 명의 접속이 수천 번의 조회가 된다.
+	--    5시즌 = 15일. 그보다 오래 비운 구간은 포기한다.
+	property integer MaxSeasonBackfill = 5
+
+	-- ⚠️ 여기만 기본값이 `nil`이라 **보스 기믹이 통째로 죽어 있었다**(2026-09-06).
+	-- 코드가 전부 `isvalid` 가드를 두고 있어 오류 없이 조용히 넘어갔다.
+	-- UUID는 `BattleManager.EnemySkillManager`가 쓰는 것과 같다(엔티티명 `EnemySkillManager`).
+	property EnemySkillManager EnemySkillManager = "a6b4c8b3-aae1-4c70-bbfc-ee54485c1b27"
+
+	method void OnBeginPlay()
+		if self:IsServer() then
+			self._T.attemptCache = {}
+			self._T.dailyRewardCache = {}   -- userId -> { date = "YYYYMMDD", phases = { [phase]=true } }
+			self:_LoadRewardTable()
+		else
+			self._T.bossData        = {}
+			self._T.partData        = {}
+			self._T.isBossActive = false
+			self._T.currentPhase = 0
+			self._T.currentHp    = 0
+			self._T.maxHp        = 0
+			self._T.activeBossId = ""
+			self._T.remainingAttempts = self.MaxDailyAttempts
+			self:_LoadAllBossData()
+			self:RequestBossAttempts()
+			-- 지난 시즌 랭킹 보상은 접속 시 정산한다(오프라인 유저에게 줄 방법이 이것뿐이다).
+			self:RequestSeasonSettle()
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _LoadAllBossData()
+		local count = _DataService:GetRowCount("BossSet")
+		for i = 1, count do
+			local id = _DataService:GetCell("BossSet", i, "BossId")
+			if id == nil or id == "" then continue end
+			self._T.bossData[id] = {
+				bossName  = _DataService:GetCell("BossSet", i, "BossName")               or "",
+				phase1HP  = tonumber(_DataService:GetCell("BossSet", i, "Phase1HP"))     or 5000,
+				phase2HP  = tonumber(_DataService:GetCell("BossSet", i, "Phase2HP"))     or 4000,
+				phase3HP  = tonumber(_DataService:GetCell("BossSet", i, "Phase3HP"))     or 3000,
+				attackDmg = tonumber(_DataService:GetCell("BossSet", i, "AttackDamage")) or 600,
+				-- 보스 기본 공격 시 히어로에게 띄울 이펙트(일반 몬스터의 `MonsterSet.AttackEffect`에 대응).
+				attackEffect = _DataService:GetCell("BossSet", i, "AttackEffectRUID") or "",
+				-- 정해진 턴 동안의 누적 딜량이 랭킹 지표라 전투는 턴 수로 끝난다.
+				-- 0이면 무제한(구 동작). 값은 BossSet.csv에서 보스마다 조절한다.
+				turnLimit = tonumber(_DataService:GetCell("BossSet", i, "TurnLimit"))    or 0,
+				-- 무한 페이즈에 들어간 뒤 **턴마다** 보스 공격력에 곱해지는 배율(복리).
+				-- 1.0이면 상승 없음(구 동작). 페이즈 HP는 약한 파티도 P3까지 깰 수 있게 낮게 두고,
+				-- 대신 여기서 시간 압박을 만들어 **30턴 완주는 최고 성장 파티만** 되게 하는 장치다.
+				endlessAtkGrowth = tonumber(_DataService:GetCell("BossSet", i, "EndlessAtkGrowth")) or 1.0,
+				-- 무한 페이즈의 체력. **페이즈 반복이 아니라 "엄청 많아 무한처럼 보이는" 한 칸**이다.
+				-- 30턴 최대 화력보다 넉넉히 커야 한다(현재 최강 파티 39,158,701 → 1억이면 39% 소모).
+				endlessHP = tonumber(_DataService:GetCell("BossSet", i, "EndlessHP")) or 100000000,
+			}
+		end
+		local pCount = _DataService:GetRowCount("BossPartSet")
+		for i = 1, pCount do
+			local id  = _DataService:GetCell("BossPartSet", i, "BossId")
+			local idx = tonumber(_DataService:GetCell("BossPartSet", i, "PartIndex")) or 0
+			if id == nil or id == "" then continue end
+			if self._T.partData[id] == nil then self._T.partData[id] = {} end
+			self._T.partData[id][idx] = {
+				spriteRUID = _DataService:GetCell("BossPartSet", i, "SpriteRUID") or "",
+				posX       = tonumber(_DataService:GetCell("BossPartSet", i, "PosX"))    or 0,
+				posY       = tonumber(_DataService:GetCell("BossPartSet", i, "PosY"))    or 0,
+				width      = tonumber(_DataService:GetCell("BossPartSet", i, "Width"))   or 200,
+				height     = tonumber(_DataService:GetCell("BossPartSet", i, "Height"))  or 200,
+			}
+		end
+	end
+
+	@ExecSpace("Server")
+	method void RequestBossAttempts()
+		local userId    = senderUserId
+		local data      = self:_EnsureAttemptData(userId)
+		local remaining = math.max(0, self.MaxDailyAttempts - data.count)
+		self:ReceiveBossAttempts(remaining, userId)
+	end
+
+	@ExecSpace("Client")
+	method void ReceiveBossAttempts(integer remaining)
+		self._T.remainingAttempts = remaining
+		self:_RefreshAttemptsUI()
+	end
+
+	-- ─────────────────────────────────────────────────────────────
+	-- 티켓 보상 (D1) — 티켓의 유일 획득처. 두 갈래다.
+	--   ① 일일 페이즈 격파: 페이즈 1·2·3을 그날 **처음** 소진할 때 1장씩 = 하루 최대 3장
+	--   ② 시즌 랭킹: 3일 시즌이 끝난 뒤 순위 차등(접속 시 지연 정산)
+	-- 수치는 전부 `BossRewardSet.csv`에 있다. 코드에 숫자를 박지 않는다.
+	--
+	-- ⚠️ 딜량은 클라가 계산해 올린다. 그래서 지급을 딜량에 비례시키지 않고
+	--    **페이즈별 1일 1회 / 순위 1시즌 1회**로 상한을 걸어 반복 도전으로 늘어나지 않게 했다.
+	--    (보스 일일 도전 횟수 제한은 Phase 6으로 미뤄져 있어 여기에 기댈 수 없다.)
+	-- ─────────────────────────────────────────────────────────────
+
+	@ExecSpace("ServerOnly")
+	method void _LoadRewardTable()
+		self._T.phaseTicket = {}   -- phase -> 티켓 수
+		self._T.rankBands   = {}   -- { min, max(0=무제한), ticket }
+		local count = _DataService:GetRowCount("BossRewardSet")
+		for i = 1, count do
+			local rType  = _DataService:GetCell("BossRewardSet", i, "Type")            or ""
+			local minV   = tonumber(_DataService:GetCell("BossRewardSet", i, "Min"))    or 0
+			local maxV   = tonumber(_DataService:GetCell("BossRewardSet", i, "Max"))    or 0
+			local ticket = tonumber(_DataService:GetCell("BossRewardSet", i, "Ticket")) or 0
+			if rType == "phase" then
+				for p = minV, maxV do self._T.phaseTicket[p] = ticket end
+			elseif rType == "rank" then
+				table.insert(self._T.rankBands, { min = minV, max = maxV, ticket = ticket })
+			end
+		end
+		log("[SeasonBoss] BossRewardSet 로드 — 페이즈 보상 " .. tostring(#self._T.rankBands) .. "개 구간")
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer _TicketForRank(integer rank)
+		if rank == nil or rank <= 0 then return 0 end
+		for _, b in ipairs(self._T.rankBands or {}) do
+			-- `max = 0`은 상한 없음(마지막 구간).
+			if rank >= b.min and (b.max == 0 or rank <= b.max) then return b.ticket end
+		end
+		return 0
+	end
+
+	@ExecSpace("ServerOnly")
+	method table _EnsureDailyReward(string userId)
+		-- 오늘 이미 보상을 받은 페이즈 집합. `boss_attempts`와 같은 날짜 리셋 패턴이다.
+		local today = tostring(os.date("%Y%m%d"))
+		local c = self._T.dailyRewardCache[userId]
+		if c ~= nil then
+			if c.date ~= today then
+				self._T.dailyRewardCache[userId] = { date = today, phases = {} }
+			end
+			return self._T.dailyRewardCache[userId]
+		end
+		local storage      = _DataStorageService:GetUserDataStorage(userId)
+		local errCode, raw = storage:GetAndWait("boss_reward")
+		local loaded = nil
+		if errCode == 0 and raw ~= nil and raw ~= "" then
+			loaded = _UtilLogic:StringToTable(raw)
+		end
+		if loaded ~= nil and loaded.date == today then
+			-- `TableToString`은 중첩 테이블을 조용히 버리므로 페이즈 집합은 문자열로 저장한다("1,3").
+			local phases = {}
+			for s in string.gmatch(tostring(loaded.phases or ""), "%d+") do
+				phases[tonumber(s)] = true
+			end
+			self._T.dailyRewardCache[userId] = { date = today, phases = phases, season = loaded.season }
+		else
+			-- 날짜가 바뀌어도 **시즌 정산 기록(season)은 유지**해야 한다. 하루 리셋과 시즌은 별개다.
+			local keepSeason = loaded ~= nil and loaded.season or nil
+			self._T.dailyRewardCache[userId] = { date = today, phases = {}, season = keepSeason }
+		end
+		return self._T.dailyRewardCache[userId]
+	end
+
+	@ExecSpace("ServerOnly")
+	method void _SaveDailyReward(string userId)
+		local d = self._T.dailyRewardCache[userId]
+		if d == nil then return end
+		local parts = {}
+		for p, _ in pairs(d.phases or {}) do table.insert(parts, tostring(p)) end
+		table.sort(parts)
+		local flat = { date = d.date, phases = table.concat(parts, ","), season = d.season }
+		local storage = _DataStorageService:GetUserDataStorage(userId)
+		storage:SetAsync("boss_reward", _UtilLogic:TableToString(flat), function(errCode, key)
+			if errCode ~= 0 then
+				log_warning("[SeasonBoss] 보상 기록 저장 실패: " .. tostring(userId))
+			end
+		end)
+	end
+
+	@ExecSpace("Server")
+	method void RequestPhaseReward(integer phase)
+		-- 페이즈를 소진할 때마다 클라가 부른다.
+		-- ⚠️ 인자는 클라가 준 값이지만 **페이즈당 하루 1회**라 반복 호출로 더 받을 수 없다.
+		local userId = senderUserId
+		if userId == nil or userId == "" then return end
+		if phase == nil or phase <= 0 then return end
+
+		local ticket = (self._T.phaseTicket or {})[phase] or 0
+		if ticket <= 0 then return end
+
+		local d = self:_EnsureDailyReward(userId)
+		if d.phases[phase] == true then return end   -- 오늘 이미 받은 페이즈
+
+		d.phases[phase] = true
+		self:_SaveDailyReward(userId)
+		self:_GrantTicket(userId, ticket, "페이즈 " .. tostring(phase) .. " 격파")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void _GrantTicket(string userId, integer amount, string reason)
+		-- `CurrencyManager`는 `@Component`라 전역(`_CurrencyManager`)이 없다.
+		-- `@Logic`인 `_HeroDataManager`의 프로퍼티를 타고 간다(As-built 상시 규칙).
+		local cm = isvalid(_HeroDataManager) and _HeroDataManager.CurrencyManager or nil
+		if cm == nil then
+			log_warning("[SeasonBoss] CurrencyManager를 찾을 수 없어 티켓 지급 실패")
+			return
+		end
+		cm:ServerAdd(userId, "ticket", amount)
+		cm:ServerPushToClient(userId)
+		self:ReceiveTicketReward(amount, reason, userId)
+		log("[SeasonBoss] 티켓 지급 " .. tostring(amount) .. "장 (" .. tostring(reason) .. ") userId=" .. tostring(userId))
+	end
+
+	@ExecSpace("Client")
+	method void ReceiveTicketReward(integer amount, string reason)
+		_UIToast:ShowMessage(tostring(reason) .. " — 티켓 " .. tostring(amount) .. "장 획득!")
+	end
+
+	@ExecSpace("Server")
+	method void RequestSeasonSettle()
+		-- 지난 시즌 랭킹 보상 정산. **접속 시 지연 정산**이다 —
+		-- MSW에는 서버 크론이 없어 시즌이 끝나는 순간 오프라인 유저에게 줄 방법이 없다.
+		-- 보드를 지우지 않고 이름만 시즌별로 나눠 두기 때문에 나중에 읽어도 순위가 그대로 남아 있다.
+		local userId = senderUserId
+		if userId == nil or userId == "" then return end
+		if not isvalid(_RankingManager) then return end
+
+		local curSeason  = _RankingManager:GetSeasonNumber()
+		local lastSeason = curSeason - 1
+
+		local d = self:_EnsureDailyReward(userId)
+		local settled = tonumber(d.season) or 0
+		if settled >= lastSeason then return end   -- 이미 정산했다
+
+		-- ── 밀린 시즌 소급 지급 (2026-09-06 사용자 결정) ────────────────
+		-- 여러 시즌을 쉬다 와도 그동안의 순위 보상을 전부 받는다.
+		-- 보드를 지우지 않고 이름만 시즌별로 나눠 두기 때문에 지난 시즌 순위가 그대로 남아 있다.
+		--
+		-- 🔴 **범위를 반드시 좁혀야 한다.** 시즌 번호는 `os.time()/259200`이라 지금도 6900대다.
+		--    `settled + 1`부터 무작정 훑으면 신규 유저(settled=0)에서 **수천 번의 정렬 조회**가 돌고,
+		--    조회 1회 = List Sorted 크레딧 1이라 접속 한 번으로 크레딧을 태워 먹는다.
+		local from = settled + 1
+		if settled <= 0 then
+			-- 정산 기록이 없는 유저 = 이번이 첫 접속. 과거를 훑을 이유가 없다.
+			from = lastSeason
+		elseif lastSeason - from + 1 > self.MaxSeasonBackfill then
+			-- 너무 오래 비운 유저는 최근 N시즌까지만. 그 이전 것은 포기한다(조회 비용 상한).
+			from = lastSeason - self.MaxSeasonBackfill + 1
+		end
+
+		-- 🔴 정산 기록을 **먼저** 저장한다. 우편 발송이 실패하면 보상을 못 받지만,
+		--    반대로 두면 중간에 끊겼을 때 **다음 접속에 또 지급**되어 티켓이 복제된다.
+		--    경제 무결성 쪽이 더 중요하다.
+		d.season = lastSeason
+		self:_SaveDailyReward(userId)
+
+		local mailCount   = 0
+		local totalTicket = 0
+		for season = from, lastSeason do
+			-- 그 시즌에 기록이 없으면(도전 안 함) 건너뛴다.
+			local rank = _RankingManager:GetRankInBossSeason(season, userId)
+			if rank > 0 then
+				local ticket = self:_TicketForRank(rank)
+				if ticket > 0 then
+					self:_SendSeasonRewardMail(userId, season, rank, ticket)
+					mailCount   += 1
+					totalTicket += ticket
+				end
+			end
+		end
+
+		if mailCount <= 0 then
+			log("[SeasonBoss] 시즌 " .. tostring(from) .. "~" .. tostring(lastSeason) ..
+				" 기록 없음 — 정산만 기록 userId=" .. tostring(userId))
+			return
+		end
+
+		-- 우편 한 통마다 토스트를 띄우면 접속하자마자 도배가 된다 → 한 번만 요약해서 알린다.
+		self:ReceiveSeasonMailNotice(mailCount, totalTicket, userId)
+		log("[SeasonBoss] 시즌 " .. tostring(from) .. "~" .. tostring(lastSeason) ..
+			" 정산 완료 — 우편 " .. tostring(mailCount) .. "통 · 티켓 " .. tostring(totalTicket) ..
+			"장 userId=" .. tostring(userId))
+	end
+
+	@ExecSpace("ServerOnly")
+	method void _SendSeasonRewardMail(string userId, integer season, integer rank, integer ticket)
+		-- 시즌 랭킹 보상은 **우편으로** 보낸다(2026-09-06 사용자 결정).
+		-- 즉시 지급은 정산이 도는 그 순간의 토스트가 전부라 놓치면 무엇을 왜 받았는지 남지 않는다.
+		-- 우편이면 기록이 남고, 유저가 원할 때 받는다.
+		--
+		-- ⚠️ 여전히 **접속 시 지연 정산**이다 — MSW에 서버 크론이 없어 시즌이 끝나는 순간
+		--    오프라인 유저에게 우편을 만들어 줄 방법이 없다. 우편은 그 유저가 다음에 접속할 때 생성된다.
+		if not isvalid(_MailManager) then
+			-- 우편을 못 쓰면 보상을 날리는 것보다 즉시 지급이 낫다(정산 기록은 이미 저장됐다).
+			log_warning("[SeasonBoss] MailManager가 없어 우편 발송 실패 — 즉시 지급으로 대체")
+			self:_GrantTicket(userId, ticket, "시즌 랭킹 " .. tostring(rank) .. "위")
+			return
+		end
+
+		local title = "시즌 보스 랭킹 보상"
+		local body  = "시즌 " .. tostring(season) .. " 보스 랭킹 " .. tostring(rank) .. "위 보상입니다.\n"
+			.. "티켓 " .. tostring(ticket) .. "장을 받아 가세요."
+		_MailManager:GMSendToUser(userId, title, body, { ticket = ticket }, self.SeasonMailRetentionDays)
+
+		-- ⚠️ 토스트는 여기서 띄우지 않는다 — 소급 지급이면 여러 번 불려 도배가 된다.
+		--    호출부(`RequestSeasonSettle`)가 전부 보낸 뒤 한 번만 요약해서 알린다.
+		log("[SeasonBoss] 시즌 " .. tostring(season) .. " 랭킹 " .. tostring(rank) ..
+			"위 보상 우편 발송 — 티켓 " .. tostring(ticket) .. "장 userId=" .. tostring(userId))
+	end
+
+	@ExecSpace("Client")
+	method void ReceiveSeasonMailNotice(integer mailCount, integer totalTicket)
+		-- 우편함에 들어갔다는 것만 알린다. 실제 지급은 유저가 우편을 수령할 때 일어난다.
+		if mailCount <= 1 then
+			_UIToast:ShowMessage("시즌 랭킹 보상 티켓 " .. tostring(totalTicket) ..
+				"장이 우편함에 도착했습니다.")
+			return
+		end
+		_UIToast:ShowMessage("밀린 시즌 보상 " .. tostring(mailCount) .. "통(티켓 " ..
+			tostring(totalTicket) .. "장)이 우편함에 도착했습니다.")
+	end
+
+	@ExecSpace("ServerOnly")
+	method table _EnsureAttemptData(string userId)
+		local today = tostring(os.date("%Y%m%d"))
+		if self._T.attemptCache[userId] ~= nil then
+			if self._T.attemptCache[userId].date ~= today then
+				self._T.attemptCache[userId] = { date = today, count = 0 }
+			end
+			return self._T.attemptCache[userId]
+		end
+		local storage      = _DataStorageService:GetUserDataStorage(userId)
+		local errCode, raw = storage:GetAndWait("boss_attempts")
+		if errCode == 0 and raw ~= nil and raw ~= "" then
+			local d = _UtilLogic:StringToTable(raw)
+			if d ~= nil and d.date == today then
+				self._T.attemptCache[userId] = { date = d.date, count = tonumber(d.count) or 0 }
+			else
+				self._T.attemptCache[userId] = { date = today, count = 0 }
+			end
+		else
+			self._T.attemptCache[userId] = { date = today, count = 0 }
+		end
+		return self._T.attemptCache[userId]
+	end
+
+	@ExecSpace("ServerOnly")
+	method void _SaveAttemptData(string userId)
+		local d = self._T.attemptCache[userId]
+		if d == nil then return end
+		local storage = _DataStorageService:GetUserDataStorage(userId)
+		local raw     = _UtilLogic:TableToString(d)
+		storage:SetAsync("boss_attempts", raw, function(errCode, key)
+			if errCode ~= 0 then
+				log_warning("[SeasonBoss] 도전 횟수 저장 실패: " .. tostring(userId))
+			end
+		end)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void TryStartBossBattle(string bossId)
+		-- 일일 도전 횟수 제한. 2026-09-06에 테스트 우회를 걷어내고 운영 경로를 켰다.
+		--
+		-- 🔴 이건 단순 편의 기능이 아니라 **경제 안전장치**다. 시즌보스 랭킹 지표가 **누적 딜량**이고
+		--    그 랭킹이 티켓을 지급하므로(D1b), 무제한 도전이면 딜량을 얼마든지 쌓아 상위권을 살 수 있다.
+		--
+		-- ⚠️ 아래 클라 검사는 **헛된 왕복을 줄이는 용도**일 뿐이다.
+		--    진짜 판정은 서버(`RequestStartBoss` → `_EnsureAttemptData` → `MaxDailyAttempts`)가 한다.
+		if (self._T.remainingAttempts or 0) <= 0 then
+			_UIPopup:Open("도전 횟수를 모두 사용했습니다.\n내일 다시 도전하세요!", nil, nil)
+			return
+		end
+		self:RequestStartBoss(bossId)
+	end
+
+	@ExecSpace("Server")
+	method void RequestStartBoss(string bossId)
+		local userId = senderUserId
+		local data   = self:_EnsureAttemptData(userId)
+		if data.count >= self.MaxDailyAttempts then
+			self:DenyBossStart(userId)
+			return
+		end
+		data.count = data.count + 1
+		self:_SaveAttemptData(userId)
+		local remaining = self.MaxDailyAttempts - data.count
+		self:ConfirmBossStart(bossId, remaining, userId)
+	end
+
+	@ExecSpace("Client")
+	method void ConfirmBossStart(string bossId, integer remaining)
+		self._T.remainingAttempts = remaining
+		self:_RefreshAttemptsUI()
+		self:_DoStartBossBattle(bossId)
+	end
+
+	@ExecSpace("Client")
+	method void DenyBossStart()
+		self._T.remainingAttempts = 0
+		self:_RefreshAttemptsUI()
+		_UIPopup:Open("도전 횟수를 모두 사용했습니다.\n내일 다시 도전하세요!", nil, nil)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _DoStartBossBattle(string bossId)
+		local data = self._T.bossData[bossId]
+		if data == nil then
+			log_warning("[SeasonBoss] 보스 데이터 없음: " .. tostring(bossId))
+			return
+		end
+		self._T.activeBossId = bossId
+		self._T.isBossActive = true
+		self._T.totalDamage  = 0       -- 이번 도전에 넣은 누적 딜량(랭킹 점수)
+		self._T.phaseDrained = false   -- 이번 페이즈 HP를 다 깎았나(턴 끝에 전환)
+		self._T.isEndless    = false   -- 최종 페이즈를 넘겨 무한 구간에 들어갔나
+		self._T.endlessTurns = 0       -- 무한 구간 경과 턴(보스 공격력 상승량)
+		self._T.currentPhase = 1
+		self._T.currentHp    = data.phase1HP
+		self._T.maxHp        = data.phase1HP
+		
+		if isvalid(self.EnemySkillManager) then
+			self.EnemySkillManager:InitForBattle(bossId)
+		end
+		
+		if isvalid(self.BattleManager) then
+			self.BattleManager:StartBattle({ Type = "SeasonBoss", _isBoss = true, _bossId = bossId })
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ResetForNormalBattle()
+		if isvalid(self.MonsterPartyPanel) then
+			self.MonsterPartyPanel.Enable = true
+		end
+		if isvalid(self.BossOverlay) then
+			self.BossOverlay.Enable = false
+		end
+		local partEnts = { self.BossPart0, self.BossPart1, self.BossPart2, self.BossPart3 }
+		for _, ent in ipairs(partEnts) do
+			if isvalid(ent) then ent.Enable = false end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnBattleReady()
+		local data = self._T.bossData[self._T.activeBossId]
+		if data == nil then return end
+		
+		if isvalid(self.MonsterPartyPanel) then
+			self.MonsterPartyPanel.Enable = false
+		end
+		if isvalid(self.BossOverlay) then
+			self.BossOverlay.Enable = true
+		end
+		if isvalid(self.BossNameTag) then
+			local txt = self.BossNameTag.TextGUIRendererComponent
+			if txt ~= nil then txt.Text = data.bossName end
+		end
+		self:_SetupBossVisuals(self._T.activeBossId)
+		self:_RefreshBossHpBar()
+		self:_RefreshPhaseText()
+		self:UpdateRemainingTurns(0)
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer GetTurnLimit()
+		-- 이번 보스의 제한 턴 수. 0이면 무제한.
+		local data = self._T.bossData[self._T.activeBossId]
+		if data == nil then return 0 end
+		return data.turnLimit or 0
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateRemainingTurns(integer turnsUsed)
+		-- 남은 턴 표시. 제한이 없으면(0) 아예 숨긴다.
+		if not isvalid(self.TurnText) then return end
+		local limit = self:GetTurnLimit()
+		if limit <= 0 then
+			self.TurnText.Enable = false
+			return
+		end
+		self.TurnText.Enable = true
+		local remaining = math.max(0, limit - turnsUsed)
+		local txt = self.TurnText.TextGUIRendererComponent
+		if txt == nil then txt = self.TurnText.TextComponent end   -- 화면에 두 종류가 섞여 있다
+		if txt ~= nil then
+			txt.Text = "남은 턴 " .. tostring(remaining) .. "/" .. tostring(limit)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnTurnLimitReached()
+		-- 제한 턴을 다 썼다. 격파하지 못했어도 그때까지의 누적 딜량으로 종료·제출한다.
+		log("[SeasonBoss] 제한 턴 소진 — 도전 종료")
+		self:EndBossBattle()
+		if isvalid(self.BattleManager) then
+			self.BattleManager:ShowResultEffect(false)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _SetupBossVisuals(string bossId)
+		local parts    = self._T.partData[bossId]
+		local partEnts = { self.BossPart0, self.BossPart1, self.BossPart2, self.BossPart3 }
+		
+		for _, ent in ipairs(partEnts) do
+			if isvalid(ent) then ent.Enable = false end
+		end
+		if parts == nil then return end
+		
+		for idx = 0, 3 do
+			local p   = parts[idx]
+			local ent = partEnts[idx + 1]
+			if p == nil or not isvalid(ent) then continue end
+		
+			local rc = ent.UITransformComponent
+			if rc ~= nil then
+				rc.anchoredPosition = Vector2(p.posX, p.posY)
+				rc.RectSize         = Vector2(p.width, p.height)
+			end
+			local spr = ent.SpriteGUIRendererComponent
+			if spr ~= nil then
+				spr.ImageRUID = DataRef(p.spriteRUID)
+				spr.Color     = Color(1, 1, 1, 1)
+			end
+			ent.Enable = true
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _RefreshBossHpBar()
+		if not isvalid(self.BossHpBar) then return end
+		local slider = self.BossHpBar.SliderComponent
+		if slider == nil then return end
+		local ratio = self._T.maxHp > 0 and (self._T.currentHp / self._T.maxHp) or 0
+		slider.Value = math.max(0, math.min(1, ratio))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _RefreshPhaseText()
+		if not isvalid(self.PhaseText) then return end
+		local txt = self.PhaseText.TextGUIRendererComponent
+		if txt == nil then txt = self.PhaseText.TextComponent end   -- 화면에 두 종류가 섞여 있다
+		if txt == nil then return end
+		-- 최종 페이즈를 한 번이라도 재충전했으면 더는 번호가 의미 없다 — 무한 페이즈.
+		if self._T.isEndless == true then
+			txt.Text = "Phase ∞"
+		else
+			txt.Text = "Phase " .. tostring(self._T.currentPhase)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean ApplyBossDamage(integer damage)
+		-- **페이즈 HP가 이미 소진된 턴**이면 남은 공격은 피해를 주지 않는다.
+		-- 연출은 BattleManager가 따로 재생하므로 화면에는 그대로 보이고, 숫자만 0이다.
+		-- 페이즈 전환은 이 턴이 완전히 끝난 뒤 `OnEnemyTurnEnd`에서 일어난다.
+		if self._T.phaseDrained == true then
+			return false
+		end
+
+		local damageMult = isvalid(self.EnemySkillManager) and self.EnemySkillManager:GetDamageMult() or 1.0
+		local finalDmg   = math.floor(damage * damageMult)
+
+		-- 랭킹 점수는 **누적 딜량**이다. 페이즈 구간에서는 HP를 넘긴 초과분을 버린다 —
+		-- 한 방으로 페이즈를 건너뛰지 못하게 하려는 것이다(페이즈를 넘기려면 턴을 써야 한다).
+		--
+		-- 🔴 **무한 페이즈에서는 버리지 않는다.** 넘길 페이즈가 없으므로 버릴 이유가 없고,
+		--    버리면 턴당 인정 딜이 HP 한 칸으로 캡돼 **최상위권 랭킹이 붕괴한다**
+		--    (실측: 전력 2.9배 차이가 점수 3.6% 차이로 눌렸다).
+		local applied
+		if self._T.isEndless == true then
+			applied = finalDmg
+		else
+			applied = math.min(finalDmg, math.max(0, self._T.currentHp))
+		end
+		self._T.totalDamage = (self._T.totalDamage or 0) + applied
+		self._T.currentHp   = self._T.currentHp - applied
+
+		if self._T.currentHp <= 0 and self._T.maxHp > 0 then
+			if self._T.isEndless == true then
+				-- 설계상 도달하지 않는다(무한 HP가 30턴 최대 화력의 2.5배 이상이다).
+				-- 그래도 닿으면 전투가 멈추지 않도록 다시 채운다.
+				self._T.currentHp = self._T.maxHp
+				log_warning("[SeasonBoss] 무한 페이즈 HP 소진 — EndlessHP가 너무 낮다")
+			else
+				self._T.currentHp    = 0
+				self._T.phaseDrained = true
+				log("[SeasonBoss] 페이즈 " .. tostring(self._T.currentPhase) .. " HP 소진 — 이번 턴 끝나면 전환")
+			end
+		end
+		self:_RefreshBossHpBar()
+
+		if isvalid(self.EnemySkillManager) and self._T.maxHp > 0 then
+			local ratio = self._T.currentHp / self._T.maxHp
+			self.EnemySkillManager:NotifyHpRatio(ratio)
+		end
+
+		return false   -- 격파 없음. BattleManager의 격파 분기는 도달하지 않는다
+	end
+
+	@ExecSpace("ClientOnly")
+	method void NotifyTurnEnd(integer turnsUsed)
+		-- 매 적 턴 끝에 불린다. 무한 구간에 들어간 뒤로 몇 턴이 지났는지만 센다.
+		--
+		-- ⚠️ **`OnEnemyTurnEnd`보다 먼저** 불려야 한다. 무한 구간에 막 진입한 그 턴은
+		--    아직 `isEndless`가 false라 0턴으로 세어야 하고, 다음 턴부터 1턴이 된다.
+		--    순서가 뒤바뀌면 진입 턴부터 공격력이 올라 한 턴만큼 더 가혹해진다.
+		self._T.turnsUsed = turnsUsed
+		if self._T.isEndless == true then
+			self._T.endlessTurns = (self._T.endlessTurns or 0) + 1
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEnemyTurnEnd()
+		-- 적 턴까지 끝난 뒤에 페이즈를 넘긴다.
+		-- HP가 0이 된 순간 바로 넘기면 그 턴에 남은 영웅 공격이 다음 페이즈 HP를 깎아버린다.
+		if self._T.phaseDrained ~= true then return end
+		self._T.phaseDrained = false
+
+		local data  = self._T.bossData[self._T.activeBossId]
+		local total = data ~= nil and self:_PhaseCount(data) or 1
+		local cur   = self._T.currentPhase or 1
+
+		-- 이 페이즈를 실제로 깼다 → 티켓 보상(하루에 페이즈당 1회, 최대 3장).
+		self:RequestPhaseReward(cur)
+
+		-- 경고 연출은 `_EnterPhase`/`_EnterEndless`가 켜는 `BossOverlay/Warning`이 담당한다.
+		if cur < total then
+			self:_EnterPhase(cur + 1)
+		else
+			self:_EnterEndless()
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _EnterEndless()
+		-- 최종 페이즈를 깬 뒤의 **무한 페이즈**.
+		--
+		-- 🔴 이건 페이즈 1·2·3의 **반복이 아니다.** "체력이 엄청 많아 사실상 무한인
+		--    하나의 구간"이다(2026-09-06 사용자 확정). 그래서:
+		--    ① 기믹은 이미 켜진 채로 **그대로 둔다** — `_EnterPhase`를 부르면
+		--       `NotifyPhaseChange`가 기믹을 재무장하고 `hp_threshold` 장부를 비운다.
+		--    ② HP는 여기서 **한 번만** 채운다(재충전 없음).
+		--    ③ 난이도는 오직 `GetBossAttackDamage`의 턴당 복리로만 오른다.
+		local data = self._T.bossData[self._T.activeBossId]
+		if data == nil then return end
+
+		self._T.isEndless    = true
+		self._T.endlessTurns = 0
+		local hp = data.endlessHP
+		self._T.currentHp = hp
+		self._T.maxHp     = hp
+		self:_RefreshBossHpBar()
+		self:_RefreshPhaseText()
+		self:_PlayWarning()
+		log("[SeasonBoss] 무한 페이즈 진입 — HP " .. tostring(hp) .. " (기믹 유지 · 공격력만 턴마다 상승)")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _PlayWarning()
+		-- 페이즈 전환 경고 애니메이션. `_EnterPhase`와 `_EnterEndless`가 같이 쓴다.
+		if not isvalid(self.Warning) then return end
+		local spr = self.Warning.SpriteGUIRendererComponent
+		if spr ~= nil then spr.AnimClipPlayType = SpriteAnimClipPlayType.Onetime end
+		self.Warning.Enable = true
+		local w = self.Warning
+		_TimerService:SetTimerOnce(function()
+			if isvalid(w) then w.Enable = false end
+		end, 2.0)
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer _PhaseCount(table data)
+		-- 이 보스가 가진 페이즈 수. HP 열이 채워진 만큼으로 센다.
+		if (data.phase3HP or 0) > 0 then return 3 end
+		if (data.phase2HP or 0) > 0 then return 2 end
+		return 1
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _EnterPhase(integer phase)
+		-- 페이즈 진입: HP 재설정 + 표시 갱신 + Warning 연출 + 기믹 통지.
+		local data = self._T.bossData[self._T.activeBossId]
+		if data == nil then return end
+
+		self._T.currentPhase = phase
+		local hp = data.phase1HP
+		if phase == 2 then
+			hp = data.phase2HP
+		elseif phase >= 3 then
+			hp = data.phase3HP
+		end
+		self._T.currentHp = hp
+		self._T.maxHp     = hp
+		self:_RefreshBossHpBar()
+		self:_RefreshPhaseText()
+
+		self:_PlayWarning()
+
+		-- 페이즈 변경 → EnemySkillManager 통지
+		if isvalid(self.EnemySkillManager) then
+			self.EnemySkillManager:NotifyPhaseChange(phase)
+		end
+		log("[SeasonBoss] 페이즈 " .. tostring(phase) .. " 진입 (HP 소진) — HP " .. tostring(hp))
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetActiveBossId()
+		-- `EnemySkillSet.EnemyId`와 같은 값이다. 보스를 일반 몬스터처럼
+		-- 스킬 파이프라인에 태울 때 이 id로 스킬을 조회한다.
+		return self._T.activeBossId or ""
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer GetBossAttackDamage()
+		local data = self._T.bossData[self._T.activeBossId]
+		if data == nil then return 0 end
+		local dmg = data.attackDmg
+		-- 무한 페이즈 가속: 경과 턴만큼 복리로 오른다.
+		-- ⚠️ 지수라 후반이 급격하다 — 1.27이면 27턴째에 ×635다. `EndlessAtkGrowth`를 만질 때는
+		--    반드시 30턴째 값을 계산해 볼 것.
+		local growth = data.endlessAtkGrowth or 1.0
+		local turns  = self._T.endlessTurns or 0
+		if growth > 1.0 and turns > 0 then
+			dmg = math.floor(dmg * (growth ^ turns))
+		end
+		if isvalid(self.EnemySkillManager) then
+			local extraMult = self.EnemySkillManager:GetExtraAtkMult()
+			dmg = math.floor(dmg * extraMult)
+		end
+		return dmg
+	end
+
+	@ExecSpace("ClientOnly")
+	method Entity GetBossTargetSlot()
+		if isvalid(self.BossPart0) then return self.BossPart0 end
+		return nil
+	end
+
+	@ExecSpace("ClientOnly")
+	method Entity GetBossEffectSlot()
+		-- 이펙트를 붙일 기준 엔티티. 파츠 하나가 아니라 **보스 몸통 전체**(`BossOverlay/BossSlot`)에 건다.
+		-- 일반 전투의 `MonsterSlot1~5`에 대응하는 자리다 — 보스전은 몬스터 슬롯을 쓰지 않아
+		-- 이 기준이 없으면 타격 이펙트가 붙을 곳이 없다.
+		if isvalid(self._T.bossFxSlot) then return self._T.bossFxSlot end
+		if isvalid(self.BossOverlay) then
+			local s = self.BossOverlay:GetChildByName("BossSlot", false)
+			if isvalid(s) then
+				self._T.bossFxSlot = s
+				return s
+			end
+		end
+		return self:GetBossTargetSlot()
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetAttackEffectRUID()
+		-- 보스 기본 공격이 히어로에게 띄우는 이펙트. `BossSet.AttackEffectRUID`가 비면 연출을 건너뛴다.
+		local data = self._T.bossData[self._T.activeBossId]
+		if data == nil then return "" end
+		return data.attackEffect or ""
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnBossDefeated()
+		log("[SeasonBoss] 보스 처치!")
+		-- 격파도 도전의 끝이다. EndBossBattle이 랭킹 제출과 화면 정리를 함께 한다.
+		-- 예전에는 여기서 isBossActive만 내리고 끝나서 **이기면 딜량이 기록되지 않았다.**
+		self:EndBossBattle()
+		if isvalid(self.BattleManager) then
+			self.BattleManager:ShowResultEffect(true)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void EndBossBattle()
+		-- 보스 랭킹 제출. 격파하지 못하고 끝나도 그때까지의 딜량이 기록된다.
+		-- 승리·패배·턴소진 세 경로가 모두 여기로 들어오므로 **중복 제출을 막는다.**
+		if self._T.isBossActive ~= true then return end
+		self._T.isBossActive = false
+		local total = self._T.totalDamage or 0
+		if total > 0 then
+			_RankingManager:RequestSubmit("boss", total)
+			log("[SeasonBoss] 랭킹 제출 누적 딜량 = " .. tostring(total))
+		end
+		self._T.totalDamage = 0
+		if isvalid(self.BossOverlay) then
+			self.BossOverlay.Enable = false
+		end
+		if isvalid(self.MonsterPartyPanel) then
+			self.MonsterPartyPanel.Enable = true
+		end
+		local partEnts = { self.BossPart0, self.BossPart1, self.BossPart2, self.BossPart3 }
+		for _, ent in ipairs(partEnts) do
+			if isvalid(ent) then ent.Enable = false end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void _RefreshAttemptsUI()
+		if not isvalid(self.AttemptsText) then return end
+		local remaining = self._T.remainingAttempts or self.MaxDailyAttempts
+		local txt = self.AttemptsText.TextGUIRendererComponent
+		if txt ~= nil then
+			txt.Text = "남은 도전: " .. tostring(remaining) .. "/" .. tostring(self.MaxDailyAttempts)
+		end
+	end
+
+	method boolean IsBossActive()
+		return self._T.isBossActive == true
+	end
+
+end

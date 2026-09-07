@@ -1,0 +1,1021 @@
+@Logic
+script HeroDataManager extends Logic
+
+	property UIHeroParty LobbyHeroParty = "b80fb102-6989-45c3-bdcb-2466af59ee31"
+
+	property CurrencyManager CurrencyManager = "2eb2fe06-342b-43dd-bcd0-feb6eae3550c"
+
+	-- 가챠에서 **이미 ★5인 영웅**이 나왔을 때 대신 주는 티켓 수(2026-09-07 사용자 지시).
+	-- 성급이 만렙이면 중복 장수가 아무 값도 없어 그대로 두면 꽝만도 못하다.
+	property integer MaxStarTicketReward = 10
+
+	method void OnBeginPlay()
+		self._T.heroBase        = {}   -- heroId -> { Name, PortraitRUID, Rarity, BaseHP, BaseATK, BaseDEF }
+		self._T.heroSkills      = {}   -- heroId -> { [starLevel] -> skill table }
+		self._T.skillIdMap      = {}   -- skillId -> { heroId, tier }
+		self._T.inventoryData   = nil  -- 서버에서 받은 전체 인벤토리 데이터 (클라이언트 전용)
+		self._T.partyCurrentHP  = {}   -- heroId -> 런 중 현재 HP (층 이동 시에도 유지)
+		
+		-- 클라이언트: CSV 정적 데이터 로드 (UI 표시용)
+		self:LoadStaticData()
+		
+		if self:IsServer() then
+			-- 서버: DataStorage 캐시 및 플러시 타이머 초기화
+			self._T.playerCache  = {}  -- userId -> { heroId -> duplicatesCount }
+			self._T.dirtyPlayers = {}  -- userId -> bool
+			self._T.partyCache   = {}  -- userId -> { [1..n] = heroId }
+			self._T.sfCache      = {}  -- userId -> { [heroId] = sfLevel (0~25) }
+			self._T.sfDirty      = {}  -- userId -> bool
+			self:LoadHeroRarityIndex()
+			self._T.flushTimer   = _TimerService:SetTimerRepeat(function()
+				self:FlushDirtyPlayers()
+			end, 60.0)
+		else
+			self:RequestInventoryData()
+		end
+	end
+
+	method void OnEndPlay()
+		-- ⚠️ **여기서 저장하지 않는다.** MSW 공식 가이드: `OnEndPlay`에서 `SetAndWait`/`SetAsync`를
+		--    호출하면 유저가 재입장할 때 **이전 저장이 제대로 로드되지 않을 수 있다.**
+		--    저장은 아래 `UserLeaveEvent` 핸들러(공식이 지정한 자리) + 60초 주기 flush가 맡는다.
+		if self:IsServer() then
+			if self._T.flushTimer then
+				_TimerService:ClearTimer(self._T.flushTimer)
+			end
+		end
+	end
+
+	@EventSender("Service", "UserService")
+	handler HandleUserLeaveEvent(UserLeaveEvent event)
+		-- 나가는 유저의 영웅·스타포스 변경분을 즉시 저장한다.
+		-- dirty가 아니면 아무것도 쓰지 않으므로 반복 입퇴장만으로는 비용이 없다.
+		if not self:IsServer() then return end
+		local userId = event.UserId
+		if userId == nil or userId == "" then return end
+
+		if self._T.dirtyPlayers ~= nil and self._T.dirtyPlayers[userId] then
+			local data = self._T.playerCache ~= nil and self._T.playerCache[userId] or nil
+			if data ~= nil then
+				local storage = _DataStorageService:GetUserDataStorage(userId)
+				local errCode = storage:SetAndWait("heroes", _UtilLogic:TableToString(data))
+				if errCode ~= 0 then
+					log_warning("[HeroDataManager] 퇴장 저장 실패(heroes): userId=" .. userId .. " code=" .. tostring(errCode))
+				else
+					self._T.dirtyPlayers[userId] = false
+				end
+			end
+		end
+
+		if self._T.sfDirty ~= nil and self._T.sfDirty[userId] then
+			local sfData = self._T.sfCache ~= nil and self._T.sfCache[userId] or nil
+			if sfData ~= nil then
+				local storage = _DataStorageService:GetUserDataStorage(userId)
+				local errCode = storage:SetAndWait("starforce", _UtilLogic:TableToString(sfData))
+				if errCode == 0 then
+					self._T.sfDirty[userId] = false
+				end
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void LoadStaticData()
+		self._T.sfDataCache     = nil  -- StarforceSet 데이터 캐시 초기화
+		self._T.starThresholds  = nil  -- StarLevelSet 캐시 초기화
+		self:LoadHeroBase()
+		self:LoadHeroSkills()
+		self:LoadHeroSkillEffects()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void LoadHeroBase()
+		self._T.heroBase = {}
+		local count = _DataService:GetRowCount("HeroSet")
+		for i = 1, count do
+			local heroId = _DataService:GetCell("HeroSet", i, "HeroId")
+			self._T.heroBase[heroId] = {
+				Name         = _DataService:GetCell("HeroSet", i, "Name"),
+				Class        = _DataService:GetCell("HeroSet", i, "Class"),
+				PortraitRUID = _DataService:GetCell("HeroSet", i, "PortraitRUID"),
+				ThumnailRUID = _DataService:GetCell("HeroSet", i, "ThumnailRUID"),
+				LocalX       = tonumber(_DataService:GetCell("HeroSet", i, "LocalX")) or 0,
+				LocalY       = tonumber(_DataService:GetCell("HeroSet", i, "LocalY")) or 0,
+				Rarity               = _DataService:GetCell("HeroSet", i, "Rarity"),
+				WeaponType           = _DataService:GetCell("HeroSet", i, "WeaponType"),
+				SecondaryWeaponType  = _DataService:GetCell("HeroSet", i, "SecondaryWeaponType") or "",
+				BaseHP     = tonumber(_DataService:GetCell("HeroSet", i, "BaseHP"))  or 0,
+				BaseATK    = tonumber(_DataService:GetCell("HeroSet", i, "BaseATK")) or 0,
+				BaseDEF    = tonumber(_DataService:GetCell("HeroSet", i, "BaseDEF")) or 0,
+				costume    = {
+					hair          = _DataService:GetCell("HeroSet", i, "HairRUID"),
+					cap           = _DataService:GetCell("HeroSet", i, "CapRUID"),
+					cape          = _DataService:GetCell("HeroSet", i, "CapeRUID"),
+					longcoat      = _DataService:GetCell("HeroSet", i, "LongcoatRUID"),
+					coat          = _DataService:GetCell("HeroSet", i, "CoatRUID"),
+					pants         = _DataService:GetCell("HeroSet", i, "PantsRUID"),
+					shoes         = _DataService:GetCell("HeroSet", i, "ShoesRUID"),
+					oneHandWeapon = _DataService:GetCell("HeroSet", i, "OneHandWeaponRUID"),
+					twoHandWeapon = _DataService:GetCell("HeroSet", i, "TwoHandWeaponRUID"),
+					faceAcc       = _DataService:GetCell("HeroSet", i, "FaceAccRUID"),
+				},
+			}
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void LoadHeroSkills()
+		self._T.heroSkills = {}
+		self._T.skillIdMap = {}
+		local count = _DataService:GetRowCount("HeroSkillSet")
+		for i = 1, count do
+			local skillId  = _DataService:GetCell("HeroSkillSet", i, "SkillId")
+			local heroId   = _DataService:GetCell("HeroSkillSet", i, "HeroId")
+			local starLv   = tonumber(_DataService:GetCell("HeroSkillSet", i, "StarLevel")) or 0
+			if self._T.heroSkills[heroId] == nil then
+				self._T.heroSkills[heroId] = {}
+			end
+			self._T.heroSkills[heroId][starLv] = {
+				SkillId          = skillId,
+				SkillName        = _DataService:GetCell("HeroSkillSet", i, "SkillName"),
+				TriggerCount     = tonumber(_DataService:GetCell("HeroSkillSet", i, "TriggerCount")) or 3,
+				TriggerCondition = _DataService:GetCell("HeroSkillSet", i, "TriggerCondition"),
+				AtkCoeff         = tonumber(_DataService:GetCell("HeroSkillSet", i, "AtkCoeff"))     or 1.0,
+				MatchCoeff       = tonumber(_DataService:GetCell("HeroSkillSet", i, "MatchCoeff"))   or 0.25,
+				EnhanceCoeff     = tonumber(_DataService:GetCell("HeroSkillSet", i, "EnhanceCoeff")) or 0.10,
+				ComboCoeff       = tonumber(_DataService:GetCell("HeroSkillSet", i, "ComboCoeff"))   or 0.25,
+				VisualType       = _DataService:GetCell("HeroSkillSet", i, "VisualType"),
+				SkillDescription = _DataService:GetCell("HeroSkillSet", i, "SkillDescription"),
+				IconRUID         = _DataService:GetCell("HeroSkillSet", i, "IconRUID"),
+				effects          = {},
+			}
+			self._T.skillIdMap[skillId] = { heroId = heroId, tier = starLv }
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void LoadHeroSkillEffects()
+		local count = _DataService:GetRowCount("HeroSkillEffectSet")
+		for i = 1, count do
+			local skillId = _DataService:GetCell("HeroSkillEffectSet", i, "SkillId")
+			local mapping = self._T.skillIdMap[skillId]
+			if mapping == nil then continue end
+			local skillsByHero = self._T.heroSkills[mapping.heroId]
+			if skillsByHero == nil then continue end
+			local skill = skillsByHero[mapping.tier]
+			if skill == nil then continue end
+			local effect = {
+				effectType = _DataService:GetCell("HeroSkillEffectSet", i, "EffectType"),
+				valueA     = tonumber(_DataService:GetCell("HeroSkillEffectSet", i, "ValueA"))   or 0,
+				valueB     = tonumber(_DataService:GetCell("HeroSkillEffectSet", i, "ValueB"))   or 0,
+				duration   = tonumber(_DataService:GetCell("HeroSkillEffectSet", i, "Duration")) or 0,
+			}
+			table.insert(skill.effects, effect)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyHeroCostume(string heroId, Entity avatarEntity)
+		if not isvalid(avatarEntity) then return end
+		local base = self:GetHeroBaseData(heroId)
+		if base == nil or base.costume == nil then return end
+		local cm = avatarEntity.CostumeManagerComponent
+		if cm == nil then return end
+		local c = base.costume
+		if c.hair          ~= nil and c.hair          ~= "" then cm:SetEquip(MapleAvatarItemCategory.Hair,              c.hair)          end
+		if c.cap           ~= nil and c.cap           ~= "" then cm:SetEquip(MapleAvatarItemCategory.Cap,               c.cap)           end
+		if c.cape          ~= nil and c.cape          ~= "" then cm:SetEquip(MapleAvatarItemCategory.Cape,              c.cape)          end
+		if c.longcoat      ~= nil and c.longcoat      ~= "" then cm:SetEquip(MapleAvatarItemCategory.Longcoat,          c.longcoat)      end
+		if c.coat          ~= nil and c.coat          ~= "" then cm:SetEquip(MapleAvatarItemCategory.Coat,              c.coat)          end
+		if c.pants         ~= nil and c.pants         ~= "" then cm:SetEquip(MapleAvatarItemCategory.Pants,             c.pants)         end
+		if c.shoes         ~= nil and c.shoes         ~= "" then cm:SetEquip(MapleAvatarItemCategory.Shoes,             c.shoes)         end
+		if c.oneHandWeapon ~= nil and c.oneHandWeapon ~= "" then cm:SetEquip(MapleAvatarItemCategory.OneHandedWeapon,   c.oneHandWeapon) end
+		if c.twoHandWeapon ~= nil and c.twoHandWeapon ~= "" then cm:SetEquip(MapleAvatarItemCategory.TwoHandedWeapon,   c.twoHandWeapon) end
+		if c.faceAcc       ~= nil and c.faceAcc       ~= "" then cm:SetEquip(MapleAvatarItemCategory.FaceAccessory,      c.faceAcc)       end
+	end
+
+	method any GetHeroBaseData(string heroId)
+		if self._T.heroBase == nil then return nil end
+		return self._T.heroBase[heroId]
+	end
+
+	method any GetHeroSkillData(string heroId, integer starLevel)
+		if self._T.heroSkills == nil then return nil end
+		local skills = self._T.heroSkills[heroId]
+		if skills == nil then return nil end
+		return skills[starLevel]
+	end
+
+	method any GetStarThresholds(string heroId)
+		-- 등급별 성급 임계값(★1~★5에 필요한 **총 획득 장수**)을 `StarLevelSet`에서 읽어 캐시한다.
+		-- 🔴 등급마다 뽑힐 확률이 다르므로 필요 장수도 달라야 한다(2026-09-07). 표는 CSV가 소스다.
+		if self._T.starThresholds == nil then
+			self._T.starThresholds = {}
+			local n = _DataService:GetRowCount("StarLevelSet")
+			for i = 1, n do
+				local rarity = _DataService:GetCell("StarLevelSet", i, "Rarity")
+				if rarity == nil or rarity == "" then continue end
+				local row = {}
+				for s = 1, 5 do
+					row[s] = tonumber(_DataService:GetCell("StarLevelSet", i, "Star" .. tostring(s))) or 0
+				end
+				self._T.starThresholds[rarity] = row
+			end
+		end
+		local rarity = self:GetHeroRarity(heroId)
+		local t = self._T.starThresholds[rarity]
+		if t ~= nil then return t end
+		-- ⚠️ 등급 행이 없으면 조용히 만렙이 되지 않도록 **가장 빡빡한 표**(옛 기본값)로 폴백한다.
+		log_warning("[HeroDataManager] StarLevelSet에 등급 행이 없다: heroId=" .. tostring(heroId) .. " rarity=" .. tostring(rarity))
+		return { 1, 3, 6, 10, 15 }
+	end
+
+	method integer CalcStarLevel(string heroId, integer duplicates)
+		-- 성급 (1~5). `duplicates`는 AddHero가 세는 **중복 카운터**라 (총 획득 장수 - 1)이다.
+		-- 🔴 임계값은 **등급마다 다르다**(`StarLevelSet`). SSR 1/3/6/10/15 · SR 1/8/15/25/38 —
+		--    SR은 특정 1명이 뽑힐 확률이 SSR의 2.5배(10%/4명 vs 1%/1명)라 그만큼 더 필요하다.
+		-- ★0은 존재하지 않는다. BattleManager가 `for tier = 0, starLevel - 1`로 스킬을 모으므로
+		-- ★0이면 루프가 한 번도 돌지 않아 신규 영웅이 공격기 0개가 된다(2026-09-04 수정).
+		-- 미보유 영웅에는 호출되지 않는다 — GetHeroStar가 -1로 먼저 거른다.
+		local total = (duplicates or 0) + 1
+		local t = self:GetStarThresholds(heroId)
+		for s = 5, 2, -1 do
+			if total >= t[s] then return s end
+		end
+		return 1
+	end
+
+	method integer GetCopiesForStar(string heroId, integer starLevel)
+		-- 해당 성급에 필요한 **총 장수**. 범위를 벗어나면 0(= 없음).
+		if starLevel == nil or starLevel < 1 or starLevel > 5 then return 0 end
+		local t = self:GetStarThresholds(heroId)
+		return t[starLevel] or 0
+	end
+
+	method string GetHeroRarity(string heroId)
+		-- 등급 조회. 클라이언트는 `heroBase`(LoadHeroBase), 서버는 `heroRarity`(LoadHeroRarityIndex)를 본다.
+		-- 🔴 `LoadHeroBase`가 ClientOnly라 서버에는 영웅 표가 없다 — 양쪽 색인이 따로 필요하다.
+		if self._T.heroRarity ~= nil and self._T.heroRarity[heroId] ~= nil then
+			return self._T.heroRarity[heroId]
+		end
+		if self._T.heroBase ~= nil then
+			local base = self._T.heroBase[heroId]
+			if base ~= nil and base.Rarity ~= nil then return base.Rarity end
+		end
+		return ""
+	end
+
+	method number CalcStarMult(integer starLevel)
+		-- 성급(차수) 배율. **차수당 ×2** — ★1 = ×1 · ★2 = ×2 · ★3 = ×4 · ★4 = ×8 · ★5 = ×16.
+		-- (2026-09-06 밸런스 개편 전에는 `1 + 성급×0.1`이라 ★5가 겨우 ×1.5였다)
+		-- ⚠️ ★0은 존재하지 않지만(총 1장부터 ★1), 방어적으로 0도 ×1로 취급한다.
+		local lv = starLevel or 0
+		if lv < 1 then lv = 1 end
+		return 2 ^ (lv - 1)
+	end
+
+	method number CalcATK(integer baseATK, integer starLevel, integer sfLevel)
+		-- 영웅 최종 공격력 = 기본 × 성급배율 × 스타포스배율.
+		-- ⚠️ **스타포스는 가산이 아니라 곱연산이다**(2026-09-06 개편). 예전에는 `+AtkBonus` 합이라
+		--    25강을 찍어도 +148(기본 1000 대비 +14.8%)뿐이라 성장이 사실상 없었다.
+		return math.floor(baseATK * self:CalcStarMult(starLevel) * self:GetStarforceATKMult(sfLevel))
+	end
+
+	method number CalcHP(integer baseHP, integer starLevel, integer sfLevel)
+		-- 영웅 최대 체력. ATK와 **같은 곡선**을 쓴다.
+		-- ⚠️ 예전에는 이 공식이 `PlayerManager`·`EnhanceUI`·`HeroInventoryUI`·여기까지
+		--    **6곳에 복붙**돼 있었다(몬스터 스탯에서 이미 한 번 밟은 패턴). 여기 하나로 모은다.
+		return math.floor(baseHP * self:CalcStarMult(starLevel) * self:GetStarforceHPMult(sfLevel))
+	end
+
+	@ExecSpace("ServerOnly")
+	method void LoadHeroRarityIndex()
+		-- 서버용 등급→영웅 색인. LoadHeroBase는 ClientOnly라 서버에는 영웅 표가 없어 별도로 구축한다.
+		self._T.rarityPool = {}
+		self._T.heroRarity = {}   -- heroId -> rarity (서버용 역색인. CalcStarLevel이 등급별 임계값을 쓴다)
+		local count = _DataService:GetRowCount("HeroSet")
+		for i = 1, count do
+			local heroId = _DataService:GetCell("HeroSet", i, "HeroId")
+			local rarity = _DataService:GetCell("HeroSet", i, "Rarity")
+			if heroId == nil or heroId == "" then continue end
+			if rarity == nil or rarity == "" then continue end
+			self._T.heroRarity[heroId] = rarity
+			if self._T.rarityPool[rarity] == nil then
+				self._T.rarityPool[rarity] = {}
+			end
+			table.insert(self._T.rarityPool[rarity], heroId)
+		end
+		for rarity, pool in pairs(self._T.rarityPool) do
+			log("[HeroDataManager] 등급 색인 " .. tostring(rarity) .. " = " .. tostring(#pool) .. "명")
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetHeroIdsByRarity(string rarity)
+		-- 해당 등급에 속한 영웅 id 목록. 없으면 빈 테이블.
+		if self._T.rarityPool == nil then return {} end
+		return self._T.rarityPool[rarity] or {}
+	end
+
+	@ExecSpace("ServerOnly")
+	method void LoadPlayerHeroes(string userId)
+		local storage = _DataStorageService:GetUserDataStorage(userId)
+		local errCode, raw = storage:GetAndWait("heroes")
+		if errCode == 0 and raw ~= nil and raw ~= "" then
+			self._T.playerCache[userId] = _UtilLogic:StringToTable(raw)
+		elseif errCode == 0 or errCode == 1000002 then
+			self._T.playerCache[userId] = {}
+		else
+			self._T.playerCache[userId] = {}
+			log_warning("[HeroDataManager] LoadPlayerHeroes 실패: userId=" .. userId .. " code=" .. tostring(errCode))
+		end
+		self._T.dirtyPlayers[userId] = false
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SavePlayerHeroes(string userId)
+		if not self._T.dirtyPlayers[userId] then return end
+		local data = self._T.playerCache[userId]
+		if data == nil then return end
+		local raw = _UtilLogic:TableToString(data)
+		local storage = _DataStorageService:GetUserDataStorage(userId)
+		storage:SetAsync("heroes", raw, function(errCode, key)
+			if errCode ~= 0 then
+				log_warning("[HeroDataManager] SavePlayerHeroes 실패: userId=" .. userId .. " code=" .. tostring(errCode))
+			else
+				self._T.dirtyPlayers[userId] = false
+			end
+		end)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void FlushDirtyPlayers()
+		for userId, dirty in pairs(self._T.dirtyPlayers) do
+			if dirty then
+				self:SavePlayerHeroes(userId)
+			end
+		end
+		for userId, dirty in pairs(self._T.sfDirty) do
+			if dirty then
+				self:SavePlayerStarforce(userId)
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void AddHero(string userId, string heroId)
+		-- heroes 구조: { [heroId] = duplicatesCount (integer) }
+		-- 키 존재 여부 = 보유 여부, 값 = 중복 횟수 (0부터 시작)
+		if self._T.playerCache[userId] == nil then
+			self._T.playerCache[userId] = {}
+		end
+		local heroes = self._T.playerCache[userId]
+		if heroes[heroId] == nil then
+			heroes[heroId] = 0
+		else
+			heroes[heroId] = (tonumber(heroes[heroId]) or 0) + 1
+		end
+		self._T.dirtyPlayers[userId] = true
+	end
+
+	@ExecSpace("ServerOnly")
+	method any GetPlayerHeroes(string userId)
+		if self._T.playerCache == nil then return {} end
+		return self._T.playerCache[userId] or {}
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsHeroOwned(string userId, string heroId)
+		local heroes = self:GetPlayerHeroes(userId)
+		return heroes[heroId] ~= nil
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetHeroStar(string userId, string heroId)
+		local heroes = self:GetPlayerHeroes(userId)
+		if heroes[heroId] == nil then return -1 end
+		return self:CalcStarLevel(heroId, tonumber(heroes[heroId]) or 0)
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetHeroDuplicates(string userId, string heroId)
+		local heroes = self:GetPlayerHeroes(userId)
+		if heroes[heroId] == nil then return -1 end
+		return tonumber(heroes[heroId]) or 0
+	end
+
+	@ExecSpace("ServerOnly")
+	method void LoadPlayerParty(string userId)
+		local storage = _DataStorageService:GetUserDataStorage(userId)
+		local errCode, raw = storage:GetAndWait("party")
+		if errCode == 0 and raw ~= nil and raw ~= "" then
+			self._T.partyCache[userId] = _UtilLogic:StringToTable(raw)
+		elseif errCode == 0 or errCode == 1000002 then
+			self._T.partyCache[userId] = {}
+		else
+			self._T.partyCache[userId] = {}
+			log_warning("[HeroDataManager] LoadPlayerParty 실패: userId=" .. userId .. " code=" .. tostring(errCode))
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SavePlayerParty(string userId)
+		local data = self._T.partyCache[userId]
+		if data == nil then return end
+		local raw = _UtilLogic:TableToString(data)
+		local storage = _DataStorageService:GetUserDataStorage(userId)
+		storage:SetAsync("party", raw, function(errCode, key)
+			if errCode ~= 0 then
+				log_warning("[HeroDataManager] SavePlayerParty 실패: userId=" .. userId)
+			end
+		end)
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean AddToParty(string userId, string heroId)
+		if not self:IsHeroOwned(userId, heroId) then
+			log_warning("[HeroDataManager] AddToParty 실패 - 미보유: heroId=" .. heroId .. " userId=" .. userId)
+			return false
+		end
+		local party = self._T.partyCache[userId] or {}
+		if #party >= 5 then
+			log_warning("[HeroDataManager] AddToParty 실패 - 파티 풀: " .. #party .. "명 (hero IDs: " .. table.concat(party, ",") .. ")")
+			return false
+		end
+		for _, id in ipairs(party) do
+			if id == heroId then return false end
+		end
+		table.insert(party, heroId)
+		self._T.partyCache[userId] = party
+		self:SavePlayerParty(userId)
+		log("[HeroDataManager] AddToParty 성공: " .. heroId)
+		return true
+	end
+
+	@ExecSpace("ServerOnly")
+	method void RemoveFromParty(string userId, string heroId)
+		local party = self._T.partyCache[userId] or {}
+		for i, id in ipairs(party) do
+			if id == heroId then
+				table.remove(party, i)
+				break
+			end
+		end
+		self._T.partyCache[userId] = party
+		self:SavePlayerParty(userId)
+		log("[HeroDataManager] RemoveFromParty: " .. heroId .. " userId=" .. userId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method any GetParty(string userId)
+		return self._T.partyCache[userId] or {}
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsInParty(string userId, string heroId)
+		local party = self._T.partyCache[userId] or {}
+		for _, id in ipairs(party) do
+			if id == heroId then return true end
+		end
+		return false
+	end
+
+	@ExecSpace("Server")
+	method void RequestInventoryData()
+		local userId = senderUserId
+		if self._T.playerCache[userId] == nil then
+			self:LoadPlayerHeroes(userId)
+		end
+		if self._T.partyCache[userId] == nil then
+			self:LoadPlayerParty(userId)
+		end
+		if self._T.sfCache[userId] == nil then
+			self:LoadPlayerStarforce(userId)
+		end
+		local heroesJson = _UtilLogic:TableToString(self._T.playerCache[userId] or {})
+		local partyJson  = _UtilLogic:TableToString(self._T.partyCache[userId]  or {})
+		local sfJson     = _UtilLogic:TableToString(self._T.sfCache[userId]     or {})
+		self:ReceiveInventoryData(heroesJson, partyJson, sfJson, userId)
+	end
+
+	@ExecSpace("Client")
+	method void ReceiveInventoryData(string heroesJson, string partyJson, string sfJson)
+		-- heroes: { [heroId] = duplicatesCount }, party: { heroId, ... }
+		-- starforce: { [heroId] = sfLevel (0~25) }
+		self._T.inventoryData = {
+			heroes    = _UtilLogic:StringToTable(heroesJson),
+			party     = _UtilLogic:StringToTable(partyJson),
+			starforce = _UtilLogic:StringToTable(sfJson),
+		}
+		_HeroInventoryUI:RefreshDisplay()
+		if isvalid(self.LobbyHeroParty) then
+			self.LobbyHeroParty:RefreshPartyDisplay()
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method any GetInventoryData()
+		return self._T.inventoryData
+	end
+
+	@ExecSpace("ClientOnly")
+	method void InitPartyHP()
+		local data = self:GetInventoryData()
+		if data == nil then return end
+		local party    = data.party  or {}
+		local myHeroes = data.heroes or {}
+		self._T.partyCurrentHP = {}
+		for _, heroId in ipairs(party) do
+			local base = self:GetHeroBaseData(heroId)
+			if base == nil then continue end
+			local dupes   = myHeroes[heroId] ~= nil and (tonumber(myHeroes[heroId]) or 0) or 0
+			local starLv  = self:CalcStarLevel(heroId, dupes)
+			local sfLevel = self:GetStarforceLevelClient(heroId)
+			local maxHP   = self:CalcHP(base.BaseHP, starLv, sfLevel)
+			self._T.partyCurrentHP[heroId] = maxHP
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method any GetHeroCurrentHP(string heroId)
+		if self._T.partyCurrentHP == nil then return nil end
+		return self._T.partyCurrentHP[heroId]
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetHeroCurrentHP(string heroId, integer hp)
+		if self._T.partyCurrentHP == nil then self._T.partyCurrentHP = {} end
+		self._T.partyCurrentHP[heroId] = hp
+	end
+
+	method any GetStarforceData(integer level)
+		-- StarforceSet.csv에서 레벨(1~25)별 강화 데이터 lazy-load
+		if self._T.sfDataCache == nil then
+			self._T.sfDataCache = {}
+			local count = _DataService:GetRowCount("StarforceSet")
+			for i = 1, count do
+				local lv = tonumber(_DataService:GetCell("StarforceSet", i, "Level")) or i
+				self._T.sfDataCache[lv] = {
+					SuccessRate     = tonumber(_DataService:GetCell("StarforceSet", i, "SuccessRate"))     or 100,
+					StoneCost       = tonumber(_DataService:GetCell("StarforceSet", i, "StoneCost"))       or 1,
+					GoldCost        = tonumber(_DataService:GetCell("StarforceSet", i, "GoldCost"))        or 0,
+					-- ⚠️ **누적 배율**이다(레벨당 배율이 아니라 1강부터의 곱을 CSV에 그대로 적어 둔다).
+					--    조회 1회로 끝나고, 표만 봐도 "25강 = ×32.33"이 바로 읽힌다.
+					AtkMult         = tonumber(_DataService:GetCell("StarforceSet", i, "AtkMult"))         or 1.0,
+					HpMult          = tonumber(_DataService:GetCell("StarforceSet", i, "HpMult"))          or 1.0,
+					SkillCoeffBonus = tonumber(_DataService:GetCell("StarforceSet", i, "SkillCoeffBonus")) or 0,
+					-- 메이플스토리 스타포스 확률표를 그대로 쓴다. 유지 확률은 CSV에 없고
+					-- 100 - 성공 - 하락 - 파괴로 유도한다. 파괴는 스타포스를 12강으로 되돌린다.
+					DowngradeRate     = tonumber(_DataService:GetCell("StarforceSet", i, "DowngradeRate"))     or 0,
+					DestroyRate       = tonumber(_DataService:GetCell("StarforceSet", i, "DestroyRate"))       or 0,
+					ProtectStoneCost  = tonumber(_DataService:GetCell("StarforceSet", i, "ProtectStoneCost"))  or 0,
+				}
+			end
+		end
+		return self._T.sfDataCache[level]
+	end
+
+	method number GetStarforceATKMult(integer sfLevel)
+		-- sfLevel(0~25)의 **누적 ATK 배율**. 0강이면 1.0(보정 없음).
+		-- CSV에 누적값이 들어 있으므로 여기서 곱을 다시 돌리지 않는다.
+		local lv = sfLevel or 0
+		if lv < 1 then return 1.0 end
+		local row = self:GetStarforceData(lv)
+		return (row ~= nil and row.AtkMult or 1.0)
+	end
+
+	method number GetStarforceHPMult(integer sfLevel)
+		-- sfLevel(0~25)의 **누적 HP 배율**. 0강이면 1.0.
+		local lv = sfLevel or 0
+		if lv < 1 then return 1.0 end
+		local row = self:GetStarforceData(lv)
+		return (row ~= nil and row.HpMult or 1.0)
+	end
+
+	method number GetSkillCoeffBonus(integer sfLevel, integer tier)
+		-- tier(0~4) 스킬에 적용되는 스타포스 스킬 계수 보정
+		-- 5강: tier0, 10강: tier1, 15강: tier2, 20강: tier3, 25강: tier4
+		local threshold = (tier + 1) * 5
+		if sfLevel < threshold then return 0.0 end
+		local row = self:GetStarforceData(threshold)
+		if row == nil then return 0.0 end
+		return row.SkillCoeffBonus or 0.0
+	end
+
+	@ExecSpace("ServerOnly")
+	method void LoadPlayerStarforce(string userId)
+		local storage = _DataStorageService:GetUserDataStorage(userId)
+		local errCode, raw = storage:GetAndWait("starforce")
+		if errCode == 0 and raw ~= nil and raw ~= "" then
+			self._T.sfCache[userId] = _UtilLogic:StringToTable(raw)
+		elseif errCode == 0 or errCode == 1000002 then
+			self._T.sfCache[userId] = {}
+		else
+			self._T.sfCache[userId] = {}
+			log_warning("[HeroDataManager] LoadPlayerStarforce 실패: userId=" .. userId .. " code=" .. tostring(errCode))
+		end
+		self._T.sfDirty[userId] = false
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SavePlayerStarforce(string userId)
+		if not self._T.sfDirty[userId] then return end
+		local sfData = self._T.sfCache[userId]
+		if sfData == nil then return end
+		local raw = _UtilLogic:TableToString(sfData)
+		local storage = _DataStorageService:GetUserDataStorage(userId)
+		storage:SetAsync("starforce", raw, function(errCode, key)
+			if errCode ~= 0 then
+				log_warning("[HeroDataManager] SavePlayerStarforce 실패: userId=" .. userId .. " code=" .. tostring(errCode))
+			else
+				self._T.sfDirty[userId] = false
+			end
+		end)
+	end
+
+	@ExecSpace("Server")
+	method void RequestStarforceEnhance(string heroId, boolean useProtect)
+		local userId = senderUserId
+		if self._T.sfCache[userId] == nil then
+			self:LoadPlayerStarforce(userId)
+		end
+		self:DoStarforceEnhance(userId, heroId, useProtect)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void DoStarforceEnhance(string userId, string heroId, boolean useProtect)
+		-- 결과 코드: success(성공) / keep(실패·유지) / down(실패·1강 하락)
+		--           max(만렙) / cost(재화 부족) / data(설정 없음)
+		local sfData = self._T.sfCache[userId]
+		if sfData == nil then sfData = {} self._T.sfCache[userId] = sfData end
+		
+		local currentSF = tonumber(sfData[heroId]) or 0
+		if currentSF >= 25 then
+			self:ReceiveStarforceResult(heroId, false, currentSF, "max", userId)
+			if isvalid(self.CurrencyManager) then self.CurrencyManager:ServerPushToClient(userId) end
+			return
+		end
+		
+		local nextSF = currentSF + 1
+		local row = self:GetStarforceData(nextSF)
+		if row == nil then
+			log_warning("[HeroDataManager] StarforceSet 데이터 없음: level=" .. tostring(nextSF))
+			self:ReceiveStarforceResult(heroId, false, currentSF, "data", userId)
+			return
+		end
+		
+		-- 보호는 "파괴 방지"다. 파괴가 없는 레벨에서 켜도 비용을 받지 않는다.
+		local canProtect  = (row.DestroyRate or 0) > 0 and (row.ProtectStoneCost or 0) > 0
+		local protecting  = (useProtect == true) and canProtect
+		local stoneCost   = (row.StoneCost or 1) + (protecting and (row.ProtectStoneCost or 0) or 0)
+		local goldCost    = row.GoldCost or 0
+		
+		local myStones = isvalid(self.CurrencyManager) and self.CurrencyManager:ServerGetStone(userId) or 0
+		local myGold   = isvalid(self.CurrencyManager) and self.CurrencyManager:ServerGetGold(userId)  or 0
+		
+		if myStones < stoneCost or myGold < goldCost then
+			self:ReceiveStarforceResult(heroId, false, currentSF, "cost", userId)
+			if isvalid(self.CurrencyManager) then self.CurrencyManager:ServerPushToClient(userId) end
+			return
+		end
+		
+		-- 재료 차감
+		if isvalid(self.CurrencyManager) then
+			if stoneCost > 0 then self.CurrencyManager:ServerSpend(userId, "stone", stoneCost) end
+			if goldCost  > 0 then self.CurrencyManager:ServerSpend(userId, "gold",  goldCost)  end
+		end
+		
+		-- 결과 판정: 굴림 한 번으로 [성공 | 파괴 | 하락 | 유지] 네 구간을 가른다.
+		-- 메이플 확률표에 67.9 같은 소수가 있어 정수 굴림이 아니라 0~100 실수를 쓴다.
+		local successRate = row.SuccessRate   or 100
+		local destroyRate = row.DestroyRate   or 0
+		local downRate    = row.DowngradeRate or 0
+		local roll = _UtilLogic:RandomDouble() * 100
+		local success = (roll < successRate)
+
+		local resultLevel = currentSF
+		local code = "keep"
+		if success then
+			resultLevel = nextSF
+			code = "success"
+		elseif roll < successRate + destroyRate then
+			if protecting then
+				-- 파괴 방지: 파괴가 "1강 하락"으로 대체된다. 영웅도 12강 복구도 없다.
+				resultLevel = math.max(0, currentSF - 1)
+				code = "down"
+			else
+				-- 파괴: 영웅을 잃지 않고 스타포스만 12강으로 되돌린다(메이플의 복구 주문서와 같은 규칙).
+				-- 파괴는 16강 시도부터라 currentSF는 항상 15 이상이지만, 방어적으로 min을 건다.
+				resultLevel = math.min(currentSF, 12)
+				code = "destroy"
+			end
+		elseif roll < successRate + destroyRate + downRate then
+			resultLevel = math.max(0, currentSF - 1)
+			code = "down"
+		end
+		
+		if resultLevel ~= currentSF then
+			sfData[heroId] = resultLevel
+			self._T.sfDirty[userId] = true
+		end
+		
+		log("[Starforce] userId=" .. tostring(userId) .. " hero=" .. tostring(heroId)
+			.. " " .. tostring(currentSF) .. "→" .. tostring(resultLevel) .. " (" .. code .. ")"
+			.. " 보호=" .. tostring(protecting) .. " 결정석-" .. tostring(stoneCost) .. " 골드-" .. tostring(goldCost))
+		
+		self:ReceiveStarforceResult(heroId, success, resultLevel, code, userId)
+		if isvalid(self.CurrencyManager) then self.CurrencyManager:ServerPushToClient(userId) end
+	end
+
+	@ExecSpace("Client")
+	method void ReceiveStarforceResult(string heroId, boolean success, integer newSFLevel, string resultCode)
+		if self._T.inventoryData == nil then self._T.inventoryData = {} end
+		if self._T.inventoryData.starforce == nil then self._T.inventoryData.starforce = {} end
+		self._T.inventoryData.starforce[heroId] = newSFLevel
+		_EnhanceUI:OnStarforceResult(heroId, success, newSFLevel, resultCode)
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetGachaConfig()
+		-- GachaConfigSet의 standard 배너 설정. 매 뽑기마다 CSV를 재파싱하지 않도록 캐시한다.
+		if self._T.gachaConfig ~= nil then return self._T.gachaConfig end
+		local count = _DataService:GetRowCount("GachaConfigSet")
+		for i = 1, count do
+			if _DataService:GetCell("GachaConfigSet", i, "BannerId") == "standard" then
+				self._T.gachaConfig = {
+					ticketCostSingle = tonumber(_DataService:GetCell("GachaConfigSet", i, "TicketCostSingle")) or 1,
+					ticketCostMulti  = tonumber(_DataService:GetCell("GachaConfigSet", i, "TicketCostMulti"))  or 10,
+					multiCount       = tonumber(_DataService:GetCell("GachaConfigSet", i, "MultiCount"))       or 10,
+					-- 빈 값 = 보장 없음. 폴백을 "hero"로 두면 칸을 비웠을 때 몰래 다시 켜지므로 ""로 둔다.
+					guaranteed       = _DataService:GetCell("GachaConfigSet", i, "GuaranteedRewardType")       or "",
+				}
+				return self._T.gachaConfig
+			end
+		end
+		return nil
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetGachaPool()
+		-- GachaSet의 가중치 풀. { rows = {...}, total = 가중치합 }
+		if self._T.gachaPool ~= nil then return self._T.gachaPool end
+		local rows  = {}
+		local total = 0
+		local count = _DataService:GetRowCount("GachaSet")
+		for i = 1, count do
+			if _DataService:GetCell("GachaSet", i, "BannerId") ~= "standard" then continue end
+			local w = tonumber(_DataService:GetCell("GachaSet", i, "Weight")) or 0
+			if w <= 0 then continue end
+			total += w
+			table.insert(rows, {
+				rewardType = _DataService:GetCell("GachaSet", i, "RewardType") or "",
+				rarity     = _DataService:GetCell("GachaSet", i, "Rarity")     or "",
+				weight     = w,
+				amount     = tonumber(_DataService:GetCell("GachaSet", i, "Amount")) or 0,
+			})
+		end
+		self._T.gachaPool = { rows = rows, total = total }
+		log("[Gacha] 풀 로드 완료 — 항목 " .. tostring(#rows) .. "개, 가중치 합 " .. tostring(total))
+		return self._T.gachaPool
+	end
+
+	@ExecSpace("ServerOnly")
+	method table RollGachaOnce()
+		-- 가중치 1회 추첨. 영웅이 뽑히면 해당 등급 풀에서 균등 선택한다.
+		local pool = self:GetGachaPool()
+		if pool == nil or pool.total <= 0 then return nil end
+		local pick = _UtilLogic:RandomIntegerRange(1, pool.total)
+		local acc  = 0
+		for _, row in ipairs(pool.rows) do
+			acc += row.weight
+			if pick <= acc then
+				if row.rewardType ~= "hero" then
+					return { rewardType = row.rewardType, rarity = "", heroId = "", amount = row.amount, isNew = false }
+				end
+				local ids = self:GetHeroIdsByRarity(row.rarity)
+				if #ids == 0 then
+					log_warning("[Gacha] 등급 " .. tostring(row.rarity) .. "에 영웅이 없음 — 추첨 스킵")
+					return nil
+				end
+				return {
+					rewardType = "hero",
+					rarity     = row.rarity,
+					heroId     = ids[_UtilLogic:RandomIntegerRange(1, #ids)],
+					amount     = 0,
+					isNew      = false,
+				}
+			end
+		end
+		return nil
+	end
+
+	@ExecSpace("ServerOnly")
+	method table RollGuaranteedHero()
+		-- 연차 보장용. 영웅 행만 대상으로 가중 추첨한다.
+		local pool = self:GetGachaPool()
+		if pool == nil then return nil end
+		local rows  = {}
+		local total = 0
+		for _, row in ipairs(pool.rows) do
+			if row.rewardType == "hero" then
+				total += row.weight
+				table.insert(rows, row)
+			end
+		end
+		if total <= 0 then return nil end
+		local pick = _UtilLogic:RandomIntegerRange(1, total)
+		local acc  = 0
+		for _, row in ipairs(rows) do
+			acc += row.weight
+			if pick <= acc then
+				local ids = self:GetHeroIdsByRarity(row.rarity)
+				if #ids == 0 then return nil end
+				return {
+					rewardType = "hero",
+					rarity     = row.rarity,
+					heroId     = ids[_UtilLogic:RandomIntegerRange(1, #ids)],
+					amount     = 0,
+					isNew      = false,
+				}
+			end
+		end
+		return nil
+	end
+
+	@ExecSpace("Server")
+	method void RequestGachaPull(integer count)
+		-- 클라이언트 뽑기 요청 진입점. 실제 처리는 서버 전용 메서드가 담당한다.
+		self:DoGachaPull(senderUserId, count)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void DoGachaPull(string userId, integer count)
+		-- 티켓 차감 → 가중 추첨 → 지급 → 결과 통지.
+		-- DataStorage 쓰기는 하지 않는다. 더티 플래그만 세우고 60초 flush / OnEndPlay가 저장한다.
+		local cfg = self:GetGachaConfig()
+		if cfg == nil then
+			log_warning("[Gacha] GachaConfigSet 설정을 찾을 수 없음")
+			self:ReceiveGachaResult("", false, "config", userId)
+			return
+		end
+		if self._T.playerCache[userId] == nil then self:LoadPlayerHeroes(userId) end
+		if self._T.partyCache[userId]  == nil then self:LoadPlayerParty(userId)  end
+		if self._T.sfCache[userId]     == nil then self:LoadPlayerStarforce(userId) end
+		
+		local pulls = (count ~= nil and count >= cfg.multiCount) and cfg.multiCount or 1
+		local cost  = (pulls > 1) and cfg.ticketCostMulti or cfg.ticketCostSingle
+		
+		if not isvalid(self.CurrencyManager) then
+			log_warning("[Gacha] CurrencyManager 미연결")
+			self:ReceiveGachaResult("", false, "config", userId)
+			return
+		end
+		if self.CurrencyManager:ServerGetTicket(userId) < cost then
+			self:ReceiveGachaResult("", false, "ticket", userId)
+			return
+		end
+		if not self.CurrencyManager:ServerSpend(userId, "ticket", cost) then
+			self:ReceiveGachaResult("", false, "ticket", userId)
+			return
+		end
+		
+		local results   = {}
+		local heroCount = 0
+		for i = 1, pulls do
+			local r = self:RollGachaOnce()
+			if r == nil then continue end
+			if r.rewardType == "hero" then heroCount += 1 end
+			table.insert(results, r)
+		end
+		
+		-- 연차 보장: 영웅이 하나도 없으면 마지막 한 칸을 영웅으로 교체
+		if pulls > 1 and heroCount == 0 and cfg.guaranteed == "hero" and #results > 0 then
+			local g = self:RollGuaranteedHero()
+			if g ~= nil then
+				results[#results] = g
+				heroCount = 1
+				log("[Gacha] 연차 보장 발동 → " .. tostring(g.heroId))
+			end
+		end
+		
+		local addGold   = 0
+		local addStone  = 0
+		local addTicket = 0
+		local maxStarConverted = 0
+		for _, r in ipairs(results) do
+			if r.rewardType == "hero" then
+				local owned = self:IsHeroOwned(userId, r.heroId)
+				-- 🔴 **이미 ★5인 영웅은 티켓으로 돌려준다**(2026-09-07 사용자 지시).
+				--    성급이 만렙이면 중복 장수가 아무 값도 없어 그대로 두면 꽝만도 못하다.
+				--    ⚠️ 판정은 `AddHero` **전에** 해야 한다 — 뒤에 하면 방금 더한 장수가 섞인다.
+				if owned and self:CalcStarLevel(r.heroId, self:GetHeroDuplicates(userId, r.heroId)) >= 5 then
+					r.maxStarHeroId = r.heroId          -- 결과 팝업이 출처를 알 수 있게 남긴다
+					r.rewardType    = "ticket"
+					r.amount        = self.MaxStarTicketReward
+					addTicket += r.amount
+					maxStarConverted += 1
+					heroCount -= 1
+				else
+					r.isNew = not owned
+					self:AddHero(userId, r.heroId)
+				end
+			elseif r.rewardType == "meso" then
+				addGold += r.amount
+			elseif r.rewardType == "stone" then
+				addStone += r.amount
+			end
+		end
+		if addGold   > 0 then self.CurrencyManager:ServerAdd(userId, "gold",   addGold)   end
+		if addStone  > 0 then self.CurrencyManager:ServerAdd(userId, "stone",  addStone)  end
+		if addTicket > 0 then self.CurrencyManager:ServerAdd(userId, "ticket", addTicket) end
+
+		log("[Gacha] userId=" .. tostring(userId) .. " pulls=" .. tostring(pulls)
+			.. " 티켓-" .. tostring(cost) .. " 영웅=" .. tostring(heroCount)
+			.. " 메소+" .. tostring(addGold) .. " 결정석+" .. tostring(addStone)
+			.. " ★5중복→티켓+" .. tostring(addTicket) .. "(" .. tostring(maxStarConverted) .. "건)")
+		
+		-- 중첩 테이블이라 TableToString은 쓸 수 없다(중첩 값이 조용히 사라짐). JSON으로 직렬화한다.
+		self:ReceiveGachaResult(_HttpService:JSONEncode({ items = results }), true, "", userId)
+		self:ReceiveInventoryData(
+			_UtilLogic:TableToString(self._T.playerCache[userId] or {}),
+			_UtilLogic:TableToString(self._T.partyCache[userId]  or {}),
+			_UtilLogic:TableToString(self._T.sfCache[userId]     or {}),
+			userId)
+		self.CurrencyManager:ServerPushToClient(userId)
+	end
+
+	@ExecSpace("Client")
+	method void ReceiveGachaResult(string resultJson, boolean success, string failReason)
+		-- 뽑기 결과 수신 → 결과 팝업 표시(_GachaResultUI).
+		if not success then
+			log_warning("[Gacha] 뽑기 실패 — 사유: " .. tostring(failReason))
+			self._T.lastGachaResult = nil
+			_GachaResultUI:EndPull()   -- 실패 시 뽑기 잠금 해제 (성공은 Show가 푼다)
+			-- 실패는 화면에 아무 변화가 없어 원인을 알 수 없으므로 토스트로 알린다.
+			if failReason == "ticket" then
+				_UIToast:ShowMessage("소환 티켓이 부족합니다.")
+			else
+				_UIToast:ShowMessage("소환에 실패했습니다.")
+			end
+			return
+		end
+		local decoded = _HttpService:JSONDecode(resultJson)
+		local items = (decoded ~= nil and decoded.items) or {}
+		self._T.lastGachaResult = items
+		for i, r in ipairs(items) do
+			log("[Gacha] " .. tostring(i) .. ") " .. tostring(r.rewardType)
+				.. " " .. tostring(r.rarity) .. " " .. tostring(r.heroId)
+				.. " amount=" .. tostring(r.amount) .. " isNew=" .. tostring(r.isNew))
+		end
+		_GachaResultUI:Show(items)
+	end
+
+	@ExecSpace("ClientOnly")
+	method any GetLastGachaResult()
+		-- B3(결과 연출)에서 읽어간다.
+		return self._T.lastGachaResult
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer GetStarforceLevelClient(string heroId)
+		local data = self._T.inventoryData
+		if data == nil or data.starforce == nil then return 0 end
+		return tonumber(data.starforce[heroId]) or 0
+	end
+
+	-- 🗑️ `RequestDebugAddAllHeroes` / `DebugAddAllHeroes` 제거 (2026-09-06, Phase 2 C1)
+	--    전 영웅을 ★5로 즉시 지급하던 디버그 경로. `@ExecSpace("Server")`라 **버튼이 없어도
+	--    클라 스크립트에서 그냥 부를 수 있는 RPC**였고, 그대로 두면 가챠 루프가 통째로 무의미해진다.
+	--    출시 기준의 "디버그 기능이 빌드에 남아 있지 않다"에 걸리는 항목이기도 하다.
+	--    영웅 획득의 정식 경로는 가챠(`RequestGachaPull`)와 우편 첨부(`MailManager` → `AddHero`)뿐이다.
+
+	@ExecSpace("Server")
+	method void RequestAddToParty(string heroId)
+		local success = self:AddToParty(senderUserId, heroId)
+		local partyJson = _UtilLogic:TableToString(self._T.partyCache[senderUserId] or {})
+		self:ReceivePartyUpdate(partyJson, success, senderUserId)
+	end
+
+	@ExecSpace("Server")
+	method void RequestRemoveFromParty(string heroId)
+		self:RemoveFromParty(senderUserId, heroId)
+		local partyJson = _UtilLogic:TableToString(self._T.partyCache[senderUserId] or {})
+		self:ReceivePartyUpdate(partyJson, true, senderUserId)
+	end
+
+	@ExecSpace("Client")
+	method void ReceivePartyUpdate(string partyJson, boolean success)
+		if not success then
+			log_warning("[HeroDataManager] 파티 추가 실패 (파티 풀 or 미보유 영웅)")
+			return
+		end
+		if self._T.inventoryData == nil then self._T.inventoryData = {} end
+		self._T.inventoryData.party = _UtilLogic:StringToTable(partyJson)
+		_HeroInventoryUI:RefreshPartyPanel()
+		if isvalid(self.LobbyHeroParty) then
+			self.LobbyHeroParty:RefreshPartyDisplay()
+		end
+	end
+
+end
+

@@ -1,0 +1,9 @@
+﻿id,SkillId,MonsterEffectRUID,MonsterDuration,MonsterPlayRate,HeroEffectRUID,HeroPlayRate,ProjectileEffectRUID,ProjectileDuration,ScreenEffectRUID,ScreenDuration,ScreenPlayRate,SoundRUID,HeroSoundRUID,MonsterEffectTarget,ImpactDelay
+1,lantern_block_heal,f3289a9bc69a4b1b8e968d2735780a65,1.0,1.0,,1.0,,,,,1.0,,,,0
+2,arma_summon,4bbc8ea4efb94105a2f6246a4f253280,1.0,1.0,,1.0,,,,,1.0,,,,0
+3,balrog_smash,0c53ca97be1445508bb3aa9e7e278559,1.8,2.0,7d63c72916e54c8d925a0d03c2cf0bfd,1.0,,,,,1.0,15d0895092004527b396ecb01bca5e57,,BossPart0,0
+4,seasonboss_1_basic,e775807e590f46398cedc8057d48d056,1.2,2.0,,1.0,,,,,1.0,d17d861508a74b4a8202ff2a0557a5a5,,BossPart0,0
+5,balrog_seal,20ab96ebd55f4f009e2a73876d2d6da5,3.0,2.0,,1.0,,,,,1.0,b48b0a347ac547ef884408df8945af7d,,BossPart1,0
+6,balrog_pierce,0b287fafc0af471a95be01a1ebfb5095,2.0,2.0,9c95fb1cf5a4448885356e07f49fba6c,1.0,,,,,1.0,e348aa529e564bbc935ece0000fd6105,,BossPart2,0
+7,churup_smash,2315670e82074c3792471703a0204406,0,1.0,f961ad4f8fe7479e979e9eefaae0c75f,1.0,,,,,1.0,0ab6af34ce2140b5ae237dc16eb38b10,,,0
+8,harmony_collapse,9ca2bb2d9479487e863f05a238b1e720,0,1.0,0ac2603635a142b49ee122c376bae7b9,1.0,,,,,1.0,565e3c31f3ce44c8b7849878d1d4ebc8,,,0

@@ -1,0 +1,18 @@
+@Component
+script UIGachaPull10 extends Component
+
+	@EventSender("Self")
+	handler HandleButtonClickEvent(ButtonClickEvent event)
+		--------------- Native Event Sender Info ----------------
+		-- Sender: ButtonComponent
+		-- Space: Client
+		---------------------------------------------------------
+		-- 10연차 소환. 연차 수·단가는 GachaConfigSet이 정하며,
+		-- 서버는 count >= MultiCount일 때만 연차로 처리한다(그 외는 1회).
+		-- 팝업이 떠 있거나 이전 응답 대기 중이면 요청하지 않는다(연타 방지).
+		if not _GachaResultUI:TryBeginPull() then return end
+		log("[UIGachaPull10] 10연차 소환 요청")
+		_HeroDataManager:RequestGachaPull(10)
+	end
+
+end

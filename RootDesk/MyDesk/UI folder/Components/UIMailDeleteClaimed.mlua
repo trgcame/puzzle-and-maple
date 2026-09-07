@@ -1,0 +1,14 @@
+@Component
+script UIMailDeleteClaimed extends Component
+
+	@EventSender("Self")
+	handler HandleButtonClickEvent(ButtonClickEvent event)
+		--------------- Native Event Sender Info ----------------
+		-- Sender: ButtonComponent
+		-- Space: Client
+		---------------------------------------------------------
+		-- 수령한 우편만 일괄 삭제. 미수령분은 서버가 걸러서 남긴다.
+		_MailUI:OnClickDeleteClaimed()
+	end
+
+end

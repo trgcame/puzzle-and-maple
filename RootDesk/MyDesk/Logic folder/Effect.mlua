@@ -1,0 +1,229 @@
+@Logic
+script Effect extends Logic
+
+	@ExecSpace("ClientOnly")
+	method Entity SpawnEffect(string animRUID, Entity parent, Vector2 anchoredPos, table options)
+		local alpha     = options and options.Alpha     or 1
+		local fadeIn    = options and options.FadeIn    or false
+		local flipX     = options and options.FlipX     or false
+		local scale     = options and options.Scale     or 1
+		local offsetX   = options and options.OffsetX   or 0
+		local offsetY   = options and options.OffsetY   or 0
+		local fitParent = options and options.FitParent or false
+		local playRate  = options and options.PlayRate  or 1
+		local playOnce  = options and options.PlayOnce  or false
+		
+		local modelId = _EntryService:GetModelIdByName("Model_Effect")
+		if modelId == nil then return nil end
+		
+		local map = _UserService.LocalPlayer.CurrentMap
+		local effectEntity = _SpawnService:SpawnByModelId(modelId, "Effect", Vector3.zero, parent or map)
+		if not isvalid(effectEntity) then return nil end
+		
+		local uiTransform = effectEntity.UITransformComponent
+		if uiTransform ~= nil then
+			local base = anchoredPos or Vector2(0, 0)
+			uiTransform.anchoredPosition = Vector2(base.x + offsetX, base.y + offsetY)
+			if scale ~= 1 then
+				uiTransform.UIScale = Vector3(scale, scale, 1)
+			end
+			if fitParent and isvalid(parent) then
+				local parentTransform = parent.UITransformComponent
+				if parentTransform ~= nil then
+					uiTransform.RectSize = parentTransform.RectSize
+				end
+			end
+		end
+		
+		local renderer = effectEntity.SpriteGUIRendererComponent
+		if renderer ~= nil then
+			renderer.ImageRUID      = animRUID
+			renderer.Color          = Color(1, 1, 1, fadeIn and 0 or alpha)
+			renderer.FlipX          = flipX
+			renderer.PlayRate       = playRate
+			if playOnce then
+				renderer.AnimClipPlayType = SpriteAnimClipPlayType.Onetime
+			end
+			local preserveOpt = options and options.PreserveSprite
+			if preserveOpt == "None" then
+				renderer.PreserveSprite = PreserveSpriteType.None
+			else
+				renderer.PreserveSprite = PreserveSpriteType.NativeSize
+			end
+		end
+		
+		return effectEntity
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayEffect(string animRUID, Entity parent, Vector2 anchoredPos, table options)
+		if animRUID == nil or animRUID == "" then return end
+		local fadeIn  = options and options.FadeIn  or false
+		local fadeOut = options and options.FadeOut or false
+		local scaleOut = options and options.ScaleOut or false
+		
+		_ResourceService:PreloadAsync({animRUID}, function()
+			local rate        = math.max(options and options.PlayRate or 1, 0.01)
+			-- 클립이 아니면(= sprite RUID) 길이가 0으로 온다. 그대로 쓰면 duration이 음수가 돼
+			-- 자동 Destroy 타이머가 어긋나고 이펙트 엔티티가 화면에 남는다. 낱장 이미지용 기본 표시 시간으로 대체.
+			local staticDur   = 0.5   -- 낱장 sprite일 때의 표시 시간(초)
+			local total       = _Resource:GetTotalDelay(animRUID)
+			local duration    = total > 0 and ((total - 0.03) / rate) or (staticDur / rate)
+			local effectEntity = self:SpawnEffect(animRUID, parent, anchoredPos, options)
+			if not isvalid(effectEntity) then return end
+			local renderer     = effectEntity.SpriteGUIRendererComponent
+			local transform    = effectEntity.TransformComponent
+			local timerArray   = {}
+			local tweenerArray = {}
+		
+			if fadeIn then
+				local alpha = options and options.Alpha or 1
+				local tweener = _TweenLogic:PlayTween(0, alpha, _Resource:GetStartFrameDelay(animRUID), EaseType.Linear, function(t)
+					if isvalid(renderer) then renderer.Color.a = t end
+				end)
+				table.insert(tweenerArray, tweener)
+			end
+		
+			if fadeOut then
+				local alpha = options and options.Alpha or 1
+				local endDelay = _Resource:GetEndFrameDelay(animRUID)
+				local timer = _TimerService:SetTimerOnce(function()
+					local tweener = _TweenLogic:PlayTween(alpha, 0, endDelay, EaseType.Linear, function(t)
+						if isvalid(renderer) then renderer.Color.a = t end
+					end)
+					table.insert(tweenerArray, tweener)
+				end, math.max(0, duration - endDelay))
+				table.insert(timerArray, timer)
+			end
+		
+			if scaleOut then
+				local endDelay = _Resource:GetEndFrameDelay(animRUID)
+				local timer = _TimerService:SetTimerOnce(function()
+					local tweener = _TweenLogic:PlayTween(1, 2, endDelay, EaseType.Linear, function(t)
+						if isvalid(transform) then
+							transform.Scale.x = t
+							transform.Scale.y = t
+						end
+					end)
+					table.insert(tweenerArray, tweener)
+				end, math.max(0, duration - endDelay))
+				table.insert(timerArray, timer)
+			end
+		
+			_TimerService:SetTimerOnce(function()
+				for _, t in ipairs(timerArray)   do _TimerService:ClearTimer(t) end
+				for _, tw in ipairs(tweenerArray) do tw:Destroy() end
+				if isvalid(effectEntity) then effectEntity:Destroy() end
+			end, duration)
+		end)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void MoveEffect(string animRUID, Entity parent, Vector2 fromPos, Vector2 toPos, number duration, any easeType, table options)
+		local effectEntity = self:SpawnEffect(animRUID, parent, fromPos, options)
+		local uiTransform  = effectEntity.UITransformComponent
+		if uiTransform == nil then
+			_TimerService:SetTimerOnce(function()
+				if isvalid(effectEntity) then effectEntity:Destroy() end
+			end, duration)
+			return
+		end
+		
+		local tweener = _TweenLogic:PlayTween(0, 1, duration, easeType, function(t)
+			if not isvalid(uiTransform) then return end
+			uiTransform.anchoredPosition.x = _TweenLogic:Ease(fromPos.x, toPos.x, 1, EaseType.Linear, t)
+			uiTransform.anchoredPosition.y = _TweenLogic:Ease(fromPos.y, toPos.y, 1, EaseType.Linear, t)
+		end)
+		_TimerService:SetTimerOnce(function()
+			tweener:Destroy()
+			if isvalid(effectEntity) then effectEntity:Destroy() end
+		end, duration)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlaySlotEffect(Entity slot, string animRUID, table options)
+		if not isvalid(slot) or animRUID == nil or animRUID == "" then return end
+		self:PlayEffect(animRUID, slot, Vector2(0, 0), options)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayHeroAttackEffect(Entity heroSlot, string animRUID, table options)
+		-- 아바타 공격 모션 + 이펙트 동시 재생
+		local heroAvatar = isvalid(heroSlot) and heroSlot:GetChildByName("HeroAvatar", true) or nil
+		if isvalid(heroAvatar) then
+			local state = heroAvatar.StateComponent
+			if state ~= nil then
+				state:ChangeState("ATTACK")
+				local dur = options and options.Duration or 0.6
+				_TimerService:SetTimerOnce(function()
+					if isvalid(state) then state:ChangeState("IDLE") end
+				end, dur)
+			end
+		end
+		self:PlaySlotEffect(heroSlot, animRUID, options)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayHeroBuffEffect(Entity heroSlot, string animRUID, table options)
+		self:PlaySlotEffect(heroSlot, animRUID, options)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayHeroDebuffEffect(Entity heroSlot, string animRUID, table options)
+		self:PlaySlotEffect(heroSlot, animRUID, options)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayMonsterHitEffect(Entity monsterSlot, string animRUID, table options)
+		self:PlaySlotEffect(monsterSlot, animRUID, options)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayMonsterDebuffEffect(Entity monsterSlot, string animRUID, table options)
+		self:PlaySlotEffect(monsterSlot, animRUID, options)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayProjectileEffect(string animRUID, Entity fromEntity, Entity toEntity, Entity commonParent, number duration, table options)
+		if animRUID == nil or animRUID == "" then return end
+		if not isvalid(fromEntity) or not isvalid(toEntity) or not isvalid(commonParent) then return end
+		local fromT   = fromEntity.UITransformComponent
+		local toT     = toEntity.UITransformComponent
+		local parentT = commonParent.UITransformComponent
+		if fromT == nil or toT == nil or parentT == nil then return end
+		local fromWorld = fromT.WorldPosition
+		local toWorld   = toT.WorldPosition
+		local fromLocal = parentT:ToLocalPoint(fromWorld)
+		local toLocal   = parentT:ToLocalPoint(toWorld)
+		self:MoveEffect(animRUID, commonParent,
+			Vector2(fromLocal.x, fromLocal.y),
+			Vector2(toLocal.x, toLocal.y),
+			duration, EaseType.Linear, options)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayEffectSync(string animRUID, Entity parent, Vector2 anchoredPos, table options)
+		if animRUID == nil or animRUID == "" then return end
+		local effectEntity = self:SpawnEffect(animRUID, parent, anchoredPos, options)
+		if not isvalid(effectEntity) then return end
+		local dur = math.max(_Resource:GetTotalDelay(animRUID) - 0.03, 0.03)
+		_TimerService:SetTimerOnce(function()
+			if isvalid(effectEntity) then effectEntity:Destroy() end
+		end, dur)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayMonsterHitEffectSync(Entity monsterSlot, string animRUID, table options)
+		self:PlayEffectSync(animRUID, monsterSlot, Vector2(0, 0), options)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayAoeHitEffectSync(table monsterSlots, string animRUID, table options)
+		for _, slot in ipairs(monsterSlots) do
+			if isvalid(slot) and slot.Enable then
+				self:PlayEffectSync(animRUID, slot, Vector2(0, 0), options)
+			end
+		end
+	end
+
+end
